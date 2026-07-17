@@ -1,0 +1,108 @@
+# ============================================================
+# PROJECT: SCYLLA // .gitignore
+# ============================================================
+
+
+# ── Project-specific ─────────────────────────────────────────
+graphify-out/
+*.bat.bak
+
+# C++ vendored headers (fetched by scripts/fetch_vendors.ps1)
+cpp_core/third_party/
+
+# C++ build output
+cpp_core/build/
+cpp_core/out/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.so
+*.a
+*.o
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+.cmake/
+
+# ── Python ───────────────────────────────────────────────────
+backend/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+**/*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Environment & secrets ─────────────────────────────────────
+.env
+.env.*
+*.env
+secrets.json
+config.local.*
+
+# ── Temp files written by the launcher ───────────────────────
+scylla_odp_launch.bat
+scylla_cpp_launch.bat
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs/
+*.log.*
+
+# ── OS files ─────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ── IDEs & editors ───────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vs/
+.vs/
+*.ncb
+*.sdf
+*.VC.db
+*.VC.opendb
+nbproject/
+.settings/
+
+# ── Node (if frontend ever gets a build step) ─────────────────
+node_modules/
+.next/
+out/
+dist/
+.npm
+.eslintcache
+*.tsbuildinfo
+
+# ── Misc ─────────────────────────────────────────────────────
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
