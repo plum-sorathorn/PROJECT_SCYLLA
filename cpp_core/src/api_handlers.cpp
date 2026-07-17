@@ -49,6 +49,11 @@ static json rowToJson(const ProcessedOptionRow& r) {
         {"isWhaleSignal",     r.isWhaleSignal},
         {"trendAlignment",    r.trendAlignment},
         {"normalizedVolOI",   r.normalizedVolOI},
+        {"dte",               r.dte},
+        {"premium",           r.premium},
+        {"isWeekly",          r.isWeekly},
+        {"lastTradeDate",     r.lastTradeDate},
+        {"side",              r.side},
     };
 }
 
@@ -79,7 +84,14 @@ void registerRoutes(crow::SimpleApp& app) {
         crow::response res;
         addCors(res);
         try {
-            auto raw = fetchUnusualOptions(2.0);
+            double minVolOI = 2.0;
+            auto param = req.url_params.get("min_vol_oi");
+            if (param) {
+                try {
+                    minVolOI = std::stod(param);
+                } catch (...) {}
+            }
+            auto raw = fetchUnusualOptions(minVolOI);
             auto processed = processOptionRows(raw);
             auto summary = computeSummary(processed);
 

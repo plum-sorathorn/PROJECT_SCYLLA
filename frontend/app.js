@@ -75,7 +75,7 @@ function setLoading(id, active) {
 async function fetchScanner(minVolOI = 2.0) {
   setLoading('scanner-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/scanner`);
+    const r = await fetch(`${API_BASE}/api/scanner?min_vol_oi=${minVolOI}`);
     const json = await r.json();
     state.scannerData = json.data || [];
     updateSummary(json.summary);
@@ -102,7 +102,32 @@ function updateSummary(summary) {
 
 function renderScannerTable() {
   const tbody = $('scanner-tbody');
-  const data = [...state.scannerData];
+  let data = [...state.scannerData];
+
+  // 1. Exclude Indices / ETFs if checkbox is checked
+  const excludeIndices = $('filter-exclude-indices')?.checked;
+  if (excludeIndices) {
+    const INDEX_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'ARKK', 'VIX'];
+    data = data.filter(row => !INDEX_TICKERS.includes(row.ticker.toUpperCase()));
+  }
+
+  // 2. Interactive filter: Days to Expiration (DTE)
+  const minDte = parseInt($('filter-min-dte')?.value) || 0;
+  data = data.filter(row => row.dte === undefined || row.dte >= minDte);
+
+  // 3. Interactive filter: Option Premium (Notional value)
+  const minPremium = parseFloat($('filter-min-premium')?.value) || 0;
+  data = data.filter(row => row.premium === undefined || row.premium >= minPremium);
+
+  // 4. Interactive filter: Minimum Open Interest (OI)
+  const minOi = parseInt($('filter-min-oi')?.value) || 0;
+  data = data.filter(row => row.openInterest === undefined || row.openInterest >= minOi);
+
+  // 5. Interactive filter: Exclude Weeklies
+  const excludeWeeklies = $('filter-exclude-weeklies')?.checked;
+  if (excludeWeeklies) {
+    data = data.filter(row => row.isWeekly === false);
+  }
 
   // Sort
   data.sort((a, b) => {
@@ -114,7 +139,7 @@ function renderScannerTable() {
   });
 
   if (!data.length) {
-    tbody.innerHTML = `<tr><td colspan="13" class="table-empty">[ NO DATA — VERIFY BACKEND STATUS ]</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15" class="table-empty">[ NO DATA MATCHING FILTERS — VERIFY ACTIVE FILTERS ]</td></tr>`;
     return;
   }
 
@@ -142,15 +167,32 @@ function renderScannerTable() {
       ? `<span class="em-plus">+${fmt(row.expectedMove)}</span> / <span class="em-minus">-${fmt(row.expectedMove)}</span>`
       : '—';
 
+    const lastTrade = row.lastTradeDate ? row.lastTradeDate.replace(' ', '<br>') : '—';
+    const actionEl = row.side === 'BUY'
+      ? `<span class="badge-buy">BUY</span>`
+      : row.side === 'SELL'
+        ? `<span class="badge-sell">SELL</span>`
+        : `<span class="badge-mid">MID</span>`;
+
+    const expText = row.dte != null
+      ? `${row.expiration}<br><span style="font-size: 10px; color: var(--blue); font-weight: 500;">${row.dte}d${row.isWeekly ? ' (W)' : ' (M)'}</span>`
+      : row.expiration;
+
+    const volText = row.premium != null
+      ? `${fmtK(row.volume)}<br><span style="font-size: 10px; color: var(--mag); font-weight: 500;">$${fmtK(row.premium)}</span>`
+      : fmtK(row.volume);
+
     return `
       <tr class="${isWhale ? 'whale-row' : ''}" data-ticker="${row.ticker}" data-em="${row.expectedMove}" data-price="${row.underlierPrice}">
         <td><strong>${row.ticker}</strong></td>
-        <td>${row.expiration}</td>
+        <td>${expText}</td>
         <td>$${fmt(row.strike)}</td>
         <td>${typeEl}</td>
-        <td>${fmtK(row.volume)}</td>
+        <td>${volText}</td>
         <td>${fmtK(row.openInterest)}</td>
         <td class="${isWhale ? 'accent-blue' : ''}">${row.volOiRatio === 9999 ? '∞' : fmt(row.volOiRatio)}x</td>
+        <td style="font-size: 10px; line-height: 1.1; color: var(--text-muted);">${lastTrade}</td>
+        <td>${actionEl}</td>
         <td>${fmt(row.impliedVolatility)}%</td>
         <td>$${fmt(row.underlierPrice)}</td>
         <td>${smaFlag(row.above50dSMA, '50d')}</td>
@@ -162,15 +204,56 @@ function renderScannerTable() {
 
   tbody.innerHTML = rows.join('');
 
-  // Row click → update expected move panel
+  // Row click → update expected move panel and other widgets
   tbody.querySelectorAll('tr[data-ticker]').forEach((tr) => {
     tr.addEventListener('click', () => {
       const ticker = tr.dataset.ticker;
       const em = parseFloat(tr.dataset.em);
       const price = parseFloat(tr.dataset.price);
-      if (ticker) addToExpectedMovePanel(ticker, em, price);
+      if (ticker) {
+        addToExpectedMovePanel(ticker, em, price);
+        updateAssetWidgets(ticker);
+      }
     });
   });
+}
+
+function updateAssetWidgets(ticker) {
+  const formattedTicker = ticker.toUpperCase();
+
+  // Helper to ensure ticker option exists and select it
+  const selectElement = (selectId) => {
+    const select = $(selectId);
+    if (!select) return false;
+
+    let exists = false;
+    for (let i = 0; i < select.options.length; i++) {
+      if (select.options[i].value === formattedTicker) {
+        exists = true;
+        select.selectedIndex = i;
+        break;
+      }
+    }
+
+    if (!exists) {
+      const option = document.createElement('option');
+      option.value = formattedTicker;
+      option.textContent = formattedTicker;
+      select.appendChild(option);
+      select.value = formattedTicker;
+    }
+    return true;
+  };
+
+  // 1. Update Widget C (Volume Concentration)
+  if (selectElement('volcon-ticker')) {
+    fetchVolCon(formattedTicker);
+  }
+
+  // 2. Update Extension 1 (IV Sandbox & Skew Finder)
+  if (selectElement('iv-ticker')) {
+    fetchIVSkew(formattedTicker);
+  }
 }
 
 // ── Sort controls ────────────────────────────────────────────
@@ -183,8 +266,23 @@ document.querySelectorAll('#scanner-table th[data-sort]').forEach((th) => {
       state.sortKey = key;
       state.sortDir = -1;
     }
-    document.querySelectorAll('#scanner-table th').forEach(h => h.classList.remove('active-sort'));
+    
+    // Update active class and arrows
+    document.querySelectorAll('#scanner-table th').forEach((h) => {
+      h.classList.remove('active-sort');
+      // Clean up any existing arrows
+      const textNode = Array.from(h.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+      if (textNode) {
+        textNode.textContent = textNode.textContent.replace(/[▲▼]/g, '').trim() + ' ';
+      }
+    });
+    
     th.classList.add('active-sort');
+    const textNode = Array.from(th.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+    if (textNode) {
+      textNode.textContent = textNode.textContent.trim() + (state.sortDir === -1 ? ' ▼' : ' ▲');
+    }
+    
     renderScannerTable();
   });
 });
@@ -537,6 +635,27 @@ function chartDefaults({ title = '', xLabel = '', yLabel = '', stacked = false }
 $('btn-apply-filter').addEventListener('click', () => {
   const minVol = parseFloat($('filter-minvoloi').value) || 2.0;
   fetchScanner(minVol);
+});
+
+$('filter-exclude-indices').addEventListener('change', () => {
+  renderScannerTable();
+});
+
+$('filter-min-dte')?.addEventListener('input', (e) => {
+  $('val-min-dte').textContent = e.target.value;
+  renderScannerTable();
+});
+
+$('filter-min-premium')?.addEventListener('input', () => {
+  renderScannerTable();
+});
+
+$('filter-min-oi')?.addEventListener('input', () => {
+  renderScannerTable();
+});
+
+$('filter-exclude-weeklies')?.addEventListener('change', () => {
+  renderScannerTable();
 });
 
 $('btn-refresh-all').addEventListener('click', () => refreshAll());

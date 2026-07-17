@@ -22,6 +22,11 @@ struct RawOptionRow {
     int    above50dSMA;   // 1=true, 0=false, -1=unknown
     int    above200dSMA;
     double expectedMove;
+    int    dte;
+    double premium;
+    bool   isWeekly;
+    std::string lastTradeDate;
+    std::string side;
 };
 
 struct PcrPoint {

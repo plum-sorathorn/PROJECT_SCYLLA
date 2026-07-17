@@ -33,10 +33,26 @@ app.include_router(volume_concentration.router, prefix="/api/v1", tags=["Volume 
 app.include_router(iv_skew.router, prefix="/api/v1", tags=["IV Skew"])
 app.include_router(technicals.router, prefix="/api/v1", tags=["Technicals"])
 
+# Compatibility routes for frontend calling directly in DEV MODE (without C++ Core running)
+app.include_router(unusual_options.router, prefix="/api", tags=["Scanner API"])
+app.include_router(put_call_ratio.router, prefix="/api", tags=["Put/Call Ratio API"])
+app.include_router(volume_concentration.router, prefix="/api", tags=["Volume Concentration API"])
+app.include_router(iv_skew.router, prefix="/api", tags=["IV Skew API"])
+app.include_router(technicals.router, prefix="/api", tags=["Technicals API"])
+
 
 @app.get("/health")
 def health():
     return {"status": "online", "service": "SCYLLA OpenBB Gateway", "port": 6900}
+
+
+import os
+from fastapi.staticfiles import StaticFiles
+
+# Resolve frontend directory path relative to this script
+FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../frontend"))
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":

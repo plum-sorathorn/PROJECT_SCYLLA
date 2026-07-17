@@ -98,6 +98,11 @@ std::vector<RawOptionRow> fetchUnusualOptions(double minVolOI) {
         r.above50dSMA       = safeInt(item["above50dSMA"]);
         r.above200dSMA      = safeInt(item["above200dSMA"]);
         r.expectedMove      = safeDouble(item["expectedMove"], 0.0);
+        r.dte               = item.value("dte", 0);
+        r.premium           = safeDouble(item["premium"], 0.0);
+        r.isWeekly          = item.value("isWeekly", false);
+        r.lastTradeDate     = item.value("lastTradeDate", "");
+        r.side              = item.value("side", "");
         rows.push_back(r);
     }
     return rows;

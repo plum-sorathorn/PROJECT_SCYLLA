@@ -48,7 +48,7 @@ if (-not (Test-Path "$crowDir\include\crow.h")) {
     New-Item -ItemType Directory -Path "$crowDir\include" -Force | Out-Null
     $crowZip = "$env:TEMP\crow.zip"
     Write-Host "  Downloading Crow..."
-    Invoke-WebRequest -Uri "https://github.com/CrowCpp/Crow/releases/download/v1.2.1/crow-v1.2.1.zip" `
+    Invoke-WebRequest -Uri "https://github.com/CrowCpp/Crow/archive/refs/tags/v1.2.0.zip" `
         -OutFile $crowZip -UseBasicParsing
     Write-Host "  Extracting Crow..."
     Expand-Archive -Path $crowZip -DestinationPath "$env:TEMP\crow_extract" -Force
