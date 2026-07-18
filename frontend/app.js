@@ -83,13 +83,14 @@ async function fetchScanner(minVolOI = 2.0) {
     updateExpectedMovePanel();
   } catch (e) {
     const tbody = $('scanner-tbody');
-    tbody.innerHTML = `<tr><td colspan="13" class="table-empty">[ ERROR: CANNOT REACH C++ CORE AT ${API_BASE} ]</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15" class="table-empty">[ ERROR: ENGINE OFFLINE — CONNECTION REFUSED AT ${API_BASE} ]</td></tr>`;
     console.error('Scanner fetch error:', e);
   } finally {
     setLoading('scanner-loading', false);
   }
 }
 
+// ── Summary statistics strip ──────────────────────────────────
 function updateSummary(summary) {
   if (!summary) return;
   $('sum-whales').textContent  = summary.whaleSignalCount ?? '—';
@@ -100,6 +101,7 @@ function updateSummary(summary) {
   $('sum-putvol').textContent   = fmtK(summary.totalPutVolume);
 }
 
+// ── Scanner Table Renderer ────────────────────────────────────
 function renderScannerTable() {
   const tbody = $('scanner-tbody');
   let data = [...state.scannerData];
@@ -129,7 +131,7 @@ function renderScannerTable() {
     data = data.filter(row => row.isWeekly === false);
   }
 
-  // Sort
+  // Sort logic
   data.sort((a, b) => {
     let av = a[state.sortKey], bv = b[state.sortKey];
     if (typeof av === 'string') av = av.toLowerCase(), bv = bv.toLowerCase();
@@ -139,7 +141,7 @@ function renderScannerTable() {
   });
 
   if (!data.length) {
-    tbody.innerHTML = `<tr><td colspan="15" class="table-empty">[ NO DATA MATCHING FILTERS — VERIFY ACTIVE FILTERS ]</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15" class="table-empty">[ NO CONTRACT FLOWS DETECTED MATCHING SEARCH VECTORS ]</td></tr>`;
     return;
   }
 
@@ -174,12 +176,14 @@ function renderScannerTable() {
         ? `<span class="badge-sell">SELL</span>`
         : `<span class="badge-mid">MID</span>`;
 
+    // Muted grey style for DTE indicator
     const expText = row.dte != null
-      ? `${row.expiration}<br><span style="font-size: 10px; color: var(--blue); font-weight: 500;">${row.dte}d${row.isWeekly ? ' (W)' : ' (M)'}</span>`
+      ? `${row.expiration}<br><span style="font-size: 10px; color: var(--text-muted); font-weight: 500;">${row.dte}d${row.isWeekly ? ' (W)' : ' (M)'}</span>`
       : row.expiration;
 
+    // Gold accent color for option premium to draw visual focus
     const volText = row.premium != null
-      ? `${fmtK(row.volume)}<br><span style="font-size: 10px; color: var(--mag); font-weight: 500;">$${fmtK(row.premium)}</span>`
+      ? `${fmtK(row.volume)}<br><span style="font-size: 10px; color: var(--accent); font-weight: 500;">$${fmtK(row.premium)}</span>`
       : fmtK(row.volume);
 
     return `
@@ -190,7 +194,7 @@ function renderScannerTable() {
         <td>${typeEl}</td>
         <td>${volText}</td>
         <td>${fmtK(row.openInterest)}</td>
-        <td class="${isWhale ? 'accent-blue' : ''}">${row.volOiRatio === 9999 ? '∞' : fmt(row.volOiRatio)}x</td>
+        <td class="${isWhale ? 'accent-gold' : ''}">${row.volOiRatio === 9999 ? '∞' : fmt(row.volOiRatio)}x</td>
         <td style="font-size: 10px; line-height: 1.1; color: var(--text-muted);">${lastTrade}</td>
         <td>${actionEl}</td>
         <td>${fmt(row.impliedVolatility)}%</td>
@@ -306,7 +310,8 @@ function renderPCRChart() {
   const ctx = $('chart-pcr');
   if (!ctx) return;
 
-  const colors = { SPY: '#00E5FF', QQQ: '#E040FB', IWM: '#69FF47' };
+  // Institutional theme chart colors: Platinum, Gold, Coral
+  const colors = { SPY: '#E2E2E2', QQQ: '#D4AF37', IWM: '#BF5A5A' };
   const tickers = ['SPY', 'QQQ', 'IWM'];
 
   // Gather all labels (dates/expirations)
@@ -325,10 +330,10 @@ function renderPCRChart() {
       label: t,
       data: allLabels.map(d => dataMap[d] ?? null),
       borderColor: colors[t],
-      backgroundColor: colors[t] + '18',
+      backgroundColor: colors[t] + '10',
       borderWidth: 1.5,
-      pointRadius: 3,
-      pointHoverRadius: 5,
+      pointRadius: 2.5,
+      pointHoverRadius: 4.5,
       tension: 0.3,
       fill: false,
       spanGaps: true,
@@ -341,7 +346,7 @@ function renderPCRChart() {
     type: 'line',
     data: { labels: allLabels, datasets },
     options: chartDefaults({
-      title: 'Put/Call Ratio by Expiry Cycle',
+      title: 'Put/Call Ratio Historical Trend',
       yLabel: 'P/C Ratio',
     }),
   });
@@ -380,22 +385,22 @@ function renderVolConChart() {
         {
           label: 'Call Volume',
           data: callVols,
-          backgroundColor: '#00E5FF44',
-          borderColor: '#00E5FF',
+          backgroundColor: '#E2E2E225',  // Platinum transparent
+          borderColor: '#E2E2E2',       // Platinum solid
           borderWidth: 1,
           stack: 'vol',
         },
         {
           label: 'Put Volume',
           data: putVols,
-          backgroundColor: '#E040FB44',
-          borderColor: '#E040FB',
+          backgroundColor: '#BF5A5A25',  // Coral transparent
+          borderColor: '#BF5A5A',       // Coral solid
           borderWidth: 1,
           stack: 'vol',
         },
       ],
     },
-    options: chartDefaults({ title: 'Volume by Expiry', yLabel: 'Volume', stacked: true }),
+    options: chartDefaults({ title: 'Expiration Volume Distribution', yLabel: 'Volume', stacked: true }),
   });
 }
 
@@ -424,11 +429,11 @@ function renderIVGauges() {
   $('iv-rank-bar').style.width    = `${Math.min(d.ivRank, 100)}%`;
   $('iv-pct-bar').style.width     = `${Math.min(d.ivPercentile, 100)}%`;
 
-  // Color IV rank by level
+  // Color IV rank by level - graphite & gold style mapping
   const ivRankEl = $('iv-rank');
-  if (d.ivRank >= 75) ivRankEl.className = 'gauge-value accent-mag';
-  else if (d.ivRank >= 50) ivRankEl.className = 'gauge-value accent-blue';
-  else ivRankEl.className = 'gauge-value accent-green';
+  if (d.ivRank >= 75) ivRankEl.className = 'gauge-value accent-coral'; // High IV → Coral Alert
+  else if (d.ivRank >= 50) ivRankEl.className = 'gauge-value accent-gold';  // Mid IV → Gold Focus
+  else ivRankEl.className = 'gauge-value accent-silver';                  // Low IV → Silver Dust
 }
 
 function renderIVSmileChart() {
@@ -437,7 +442,7 @@ function renderIVSmileChart() {
 
   const smile = state.ivData.smileData || [];
   const expirations = [...new Set(smile.map(p => p.expiration))].slice(0, 2);
-  const colors = ['#00E5FF', '#E040FB'];
+  const colors = ['#E2E2E2', '#D4AF37']; // Platinum and Gold
 
   const datasets = expirations.map((exp, i) => {
     const pts = smile
@@ -447,7 +452,7 @@ function renderIVSmileChart() {
       label: exp,
       data: pts.map(p => ({ x: p.strike, y: p.iv })),
       borderColor: colors[i % 2],
-      backgroundColor: colors[i % 2] + '18',
+      backgroundColor: colors[i % 2] + '10',
       borderWidth: 1.5,
       pointRadius: 2,
       showLine: true,
@@ -460,7 +465,7 @@ function renderIVSmileChart() {
   state.charts.ivsmile = new Chart(ctx, {
     type: 'scatter',
     data: { datasets },
-    options: chartDefaults({ title: 'Volatility Smile', xLabel: 'Strike', yLabel: 'IV%' }),
+    options: chartDefaults({ title: 'Implied Volatility Smile Profile', xLabel: 'Strike', yLabel: 'IV%' }),
   });
 }
 
@@ -479,7 +484,7 @@ function updateExpectedMovePanel() {
   if (!grid) return;
 
   if (!whales.length) {
-    grid.innerHTML = `<div class="exp-placeholder">[ NO WHALE SIGNALS WITH EXPECTED MOVE DATA ]</div>`;
+    grid.innerHTML = `<div class="exp-placeholder">[ NO INSTANT WHALE BLOCKS REGISTERED WITH VALUATION BOUNDS ]</div>`;
     return;
   }
 
@@ -530,7 +535,7 @@ async function fetchSwingAlignment() {
   // Pull tickers from current scanner data (top 10 unique)
   const tickers = [...new Set(state.scannerData.map(r => r.ticker))].slice(0, 10);
   if (!tickers.length) {
-    $('swing-grid').innerHTML = `<div class="exp-placeholder">[ AWAITING SCANNER DATA ]</div>`;
+    $('swing-grid').innerHTML = `<div class="exp-placeholder">[ AWAITING REGISTRY STREAM... ]</div>`;
     return;
   }
 
@@ -545,13 +550,13 @@ async function fetchSwingAlignment() {
 
     const grid = $('swing-grid');
     if (!swingRows.length) {
-      grid.innerHTML = `<div class="exp-placeholder">[ NO DATA ]</div>`;
+      grid.innerHTML = `<div class="exp-placeholder">[ NO DATA PRESENT ]</div>`;
       return;
     }
 
     grid.innerHTML = swingRows.map(r => {
       const bullish = r.above50dSMA === 1;
-      const tickerClass = bullish ? 'accent-blue' : 'accent-mag';
+      const tickerClass = bullish ? 'accent-gold' : 'accent-coral';
       const flag50 = r.above50dSMA === 1
         ? `<span class="swing-flag-label flag-bull">▲ ABOVE 50d SMA</span>`
         : r.above50dSMA === 0
@@ -562,12 +567,6 @@ async function fetchSwingAlignment() {
         : r.above200dSMA === 0
         ? `<span class="swing-flag-label flag-bear">▼ BELOW 200d SMA</span>`
         : `<span class="swing-flag-label flag-unknown">? 200d SMA</span>`;
-
-      const trendClass = {
-        'BULL_ALIGNED': 'trend-bull-aligned',
-        'BEAR_ALIGNED': 'trend-bear-aligned',
-        'BULL_CONTRARIAN': 'trend-bull-contra',
-      }[r.trendAlignment] || 'trend-neutral';
 
       return `
         <div class="swing-row">
@@ -594,11 +593,11 @@ function chartDefaults({ title = '', xLabel = '', yLabel = '', stacked = false }
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: '#13161F',
-        borderColor: '#1E2338',
+        backgroundColor: '#121316',
+        borderColor: '#222428',
         borderWidth: 1,
-        titleColor: '#00E5FF',
-        bodyColor: '#C8D3E8',
+        titleColor: '#D4AF37',
+        bodyColor: '#E2E2E2',
         titleFont: { family: 'Share Tech Mono', size: 11 },
         bodyFont: { family: 'Share Tech Mono', size: 11 },
         padding: 10,
@@ -607,25 +606,25 @@ function chartDefaults({ title = '', xLabel = '', yLabel = '', stacked = false }
     scales: {
       x: {
         stacked,
-        grid: { color: '#1E233833', drawBorder: false },
+        grid: { color: '#22242833', drawBorder: false },
         ticks: {
-          color: '#4A556E',
+          color: '#7B7D82',
           font: { family: 'Share Tech Mono', size: 9 },
           maxTicksLimit: 8,
           maxRotation: 45,
         },
-        border: { color: '#1E2338' },
-        ...(xLabel ? { title: { display: true, text: xLabel, color: '#4A556E', font: { family: 'Share Tech Mono', size: 9 } } } : {}),
+        border: { color: '#222428' },
+        ...(xLabel ? { title: { display: true, text: xLabel, color: '#7B7D82', font: { family: 'Share Tech Mono', size: 9 } } } : {}),
       },
       y: {
         stacked,
-        grid: { color: '#1E233844', drawBorder: false },
+        grid: { color: '#22242844', drawBorder: false },
         ticks: {
-          color: '#4A556E',
+          color: '#7B7D82',
           font: { family: 'Share Tech Mono', size: 9 },
         },
-        border: { color: '#1E2338' },
-        ...(yLabel ? { title: { display: true, text: yLabel, color: '#4A556E', font: { family: 'Share Tech Mono', size: 9 } } } : {}),
+        border: { color: '#222428' },
+        ...(yLabel ? { title: { display: true, text: yLabel, color: '#7B7D82', font: { family: 'Share Tech Mono', size: 9 } } } : {}),
       },
     },
   };
@@ -699,4 +698,3 @@ async function refreshAll() {
   // Auto-refresh every 5 minutes
   setInterval(refreshAll, 5 * 60 * 1000);
 })();
-

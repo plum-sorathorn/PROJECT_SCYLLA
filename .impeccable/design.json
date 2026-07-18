@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-18T21:43:00Z",
+  "title": "Design System: PROJECT: SCYLLA",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Muted Gold",
+        "canonical": "oklch(75% 0.12 85)",
+        "tonalRamp": [
+          "#271F05",
+          "#4C3D0B",
+          "#765F11",
+          "#A28318",
+          "#D4AF37",
+          "#DFBF5F",
+          "#EAD087",
+          "#F5E0AF"
+        ]
+      },
+      "neutral-bg": {
+        "role": "neutral",
+        "displayName": "Matte Graphite",
+        "canonical": "oklch(9% 0.002 240)",
+        "tonalRamp": [
+          "#040505",
+          "#070809",
+          "#0B0C0E",
+          "#141619",
+          "#1E2125",
+          "#3D4249",
+          "#7B828E",
+          "#D3D6DC"
+        ]
+      },
+      "neutral-surface": {
+        "role": "neutral",
+        "displayName": "Dark Satin",
+        "canonical": "oklch(13% 0.004 240)",
+        "tonalRamp": [
+          "#0B0C0E",
+          "#121316",
+          "#1E2024",
+          "#2B2F36",
+          "#3B4049",
+          "#5D6574",
+          "#A0A9B7",
+          "#E3E6EA"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display Serif",
+        "purpose": "Elegant serifs for primary headers only."
+      },
+      "body": {
+        "displayName": "Body Sans",
+        "purpose": "Readable sans-serif for UI copy, tables, and settings."
+      },
+      "label": {
+        "displayName": "Label Mono",
+        "purpose": "Monospace numbers and values in option sheets."
+      }
+    },
+    "shadows": [
+      {
+        "name": "active-focus-glow",
+        "value": "0 0 4px rgba(212, 175, 55, 0.25)",
+        "purpose": "Subtle gold glow on active focus elements."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out-expo",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Smooth exponential easing for socket events and hover transitions."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Standard gold button for primary terminal actions.",
+      "html": "<button class=\"ds-btn-primary\">REFRESH DATA</button>",
+      "css": ".ds-btn-primary { background: #D4AF37; color: #0B0C0E; border: none; padding: 6px 14px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; border-radius: 2px; cursor: pointer; transition: background 150ms cubic-bezier(0.16, 1, 0.3, 1); } .ds-btn-primary:hover { background: #F3CD4F; }"
+    },
+    {
+      "name": "Data Container",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Obsidian satin plate holding scanner tables and telemetry panels.",
+      "html": "<div class=\"ds-card\"><h3 class=\"ds-card-title\">SCANNER</h3><p class=\"ds-card-body\">Data stream initialized.</p></div>",
+      "css": ".ds-card { background: #121316; border: 1px solid #222428; border-radius: 2px; padding: 16px; } .ds-card-title { font-family: 'Instrument Serif', serif; color: #E2E2E2; font-size: 16px; margin-bottom: 8px; } .ds-card-body { font-family: 'Inter', sans-serif; color: #7B7D82; font-size: 13px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Leviathan's Wake",
+    "overview": "This design system establishes a premium, institutional-grade visual interface for PROJECT: SCYLLA. It shifts the scanner away from gamer-centric 'neon cyberpunk' tropes and repositions it as an elite, high-performance financial cockpit.",
+    "keyCharacteristics": [
+      "Restrained Luxury: Gold and graphite tones.",
+      "Surgical Density: High data visibility with fine borders.",
+      "Organic Motion: Smooth state-only transitions."
+    ],
+    "rules": [
+      {
+        "name": "The Rarity Rule",
+        "body": "The primary gold accent must not exceed 10% of any given screen area.",
+        "section": "colors"
+      },
+      {
+        "name": "The Signal-Contrast Rule",
+        "body": "Do not pair green/red neon alongside gold. Calls are chrome, puts are coral red.",
+        "section": "colors"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "All containers and widgets sit on the same horizontal plane. Shadows are forbidden.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do format all financial data and option metrics in monospace font.",
+      "Do highlight whale volume/OI anomalies with a solid gold tag or a fine gold border overlay."
+    ],
+    "donts": [
+      "Don't use neon cyan, fluorescent green, or bright purple gradients.",
+      "Don't use decorative scanlines or animate elements on hover."
+    ]
+  }
+}

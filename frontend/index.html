@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="PROJECT: SCYLLA — Cyberpunk options swing trading terminal. Real-time whale scanner, IV skew, put/call ratio, and expected move calculator." />
-  <meta name="theme-color" content="#0F111A" />
-  <title>PROJECT: SCYLLA // TERMINAL</title>
+  <meta name="description" content="PROJECT: SCYLLA — Institutional derivatives scanner. Real-time institutional flow tracking, volatility skew analysis, put/call distribution, and projected valuation boundaries." />
+  <meta name="theme-color" content="#0B0C0E" />
+  <title>PROJECT: SCYLLA // TACTICAL CONSOLE</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Instrument+Serif:ital,wght@0,400;0,400i;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -16,46 +16,46 @@
 
 <!-- ══════════════════════════════════════════════════
      HEADER
-══════════════════════════════════════════════════ -->
+     ══════════════════════════════════════════════════ -->
 <header class="site-header">
   <div class="header-brand">
     <div class="header-logo-glyph">⬡</div>
     <div class="header-title-group">
-      <h1 class="header-title">PROJECT: SCYLLA <span class="header-sep">//</span> TERMINAL</h1>
-      <p class="header-sub">HYBRID OPTIONS WHALE SCANNER <span class="accent-blue">v1.0</span> &nbsp;|&nbsp; C++ CORE &nbsp;|&nbsp; OpenBB ODP</p>
+      <h1 class="header-title">PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Tactical Console</span></h1>
+      <p class="header-sub">VOLATILITY & FLOW TELEMETRY — POWERED BY C++ CORE & OpenBB ODP</p>
     </div>
   </div>
   <div class="header-status">
     <div class="status-cluster">
       <span class="status-dot" id="status-core"></span>
-      <span class="status-label">C++ CORE</span>
+      <span class="status-label">CORE ENGINE</span>
     </div>
     <div class="status-cluster">
       <span class="status-dot" id="status-odp"></span>
-      <span class="status-label">ODP LAYER</span>
+      <span class="status-label">ODP FEED</span>
     </div>
     <div class="header-clock" id="header-clock">--:--:--</div>
-    <button class="btn-refresh" id="btn-refresh-all" title="Refresh all data">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-      REFRESH
+    <button class="btn-refresh" id="btn-refresh-all" title="Synchronize telemetry data">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 4px; vertical-align: middle;"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+      SYNCHRONIZE
     </button>
   </div>
 </header>
 
 <!-- ══════════════════════════════════════════════════
-     SUMMARY STRIP
-══════════════════════════════════════════════════ -->
+     SUMMARY TELEMETRY STRIP
+     ══════════════════════════════════════════════════ -->
 <section class="summary-strip">
   <div class="summary-tile">
-    <span class="tile-label">WHALE SIGNALS</span>
-    <span class="tile-value accent-blue" id="sum-whales">--</span>
+    <span class="tile-label">WHALE BLOCKS</span>
+    <span class="tile-value accent-gold" id="sum-whales">--</span>
   </div>
   <div class="summary-tile">
-    <span class="tile-label">MAX VOL/OI</span>
-    <span class="tile-value accent-blue" id="sum-maxvoloi">--</span>
+    <span class="tile-label">PEAK VOL / OI</span>
+    <span class="tile-value accent-gold" id="sum-maxvoloi">--</span>
   </div>
   <div class="summary-tile">
-    <span class="tile-label">AVG VOL/OI</span>
+    <span class="tile-label">MEAN RATIO</span>
     <span class="tile-value" id="sum-avgvoloi">--</span>
   </div>
   <div class="summary-tile">
@@ -63,61 +63,61 @@
     <span class="tile-value" id="sum-agg-pcr">--</span>
   </div>
   <div class="summary-tile">
-    <span class="tile-label">TOTAL CALL VOL</span>
-    <span class="tile-value accent-blue" id="sum-callvol">--</span>
+    <span class="tile-label">CALL DISTRIBUTION</span>
+    <span class="tile-value accent-call" id="sum-callvol">--</span>
   </div>
   <div class="summary-tile">
-    <span class="tile-label">TOTAL PUT VOL</span>
-    <span class="tile-value accent-mag" id="sum-putvol">--</span>
+    <span class="tile-label">PUT DISTRIBUTION</span>
+    <span class="tile-value accent-put" id="sum-putvol">--</span>
   </div>
 </section>
 
 <!-- ══════════════════════════════════════════════════
      MAIN DASHBOARD GRID
-══════════════════════════════════════════════════ -->
+     ══════════════════════════════════════════════════ -->
 <main class="dashboard-grid">
 
-  <!-- ── WIDGET A: Unusual Options Scanner ─────────── -->
+  <!-- ── WIDGET A: Unusual Activity Registry ─────────── -->
   <section class="card card-full" id="card-scanner">
     <div class="card-header">
       <div class="card-header-left">
-        <span class="card-icon">◈</span>
-        <h2 class="card-title">EOD UNUSUAL OPTIONS VOLUME SCANNER</h2>
-        <span class="card-badge accent-blue">WIDGET A</span>
+        <span class="card-icon">◇</span>
+        <h2 class="card-title">UNUSUAL ACTIVITY REGISTRY</h2>
+        <span class="card-badge accent-gold">REGISTRY</span>
       </div>
       <div class="card-header-right">
         <label class="filter-label">MIN VOL/OI:
           <input type="number" id="filter-minvoloi" class="filter-input" value="2" min="0" step="0.5" />
         </label>
-        <button class="btn-sm" id="btn-apply-filter">APPLY</button>
+        <button class="btn-sm" id="btn-apply-filter">APPLY VECTORS</button>
         <div class="loading-indicator" id="scanner-loading">
-          <span class="spinner"></span> SCANNING...
+          <span class="spinner"></span> SCANNING IN PROCESS...
         </div>
       </div>
     </div>
 
     <!-- Swing Trading Interactive Filters Bar -->
     <div class="scanner-filters-bar">
-      <label class="filter-label">MIN DTE: <span id="val-min-dte" class="accent-blue">14</span>d
+      <label class="filter-label">THRESHOLD DTE: <span id="val-min-dte" class="accent-gold">14</span>d
         <input type="range" id="filter-min-dte" min="0" max="90" value="14" class="filter-slider" />
       </label>
       
-      <label class="filter-label">MIN PREMIUM: $
+      <label class="filter-label">MIN NOTIONAL: $
         <input type="number" id="filter-min-premium" value="50000" min="0" step="5000" class="filter-input filter-input-large" />
       </label>
       
-      <label class="filter-label">MIN OI:
+      <label class="filter-label">MIN CONTRACT OI:
         <input type="number" id="filter-min-oi" value="100" min="0" step="50" class="filter-input filter-input-large" />
       </label>
       
       <label class="filter-label checkbox-label">
         <input type="checkbox" id="filter-exclude-indices" class="filter-checkbox" />
-        EXCLUDE INDICES
+        EXCLUDE INDEX SECURITIES
       </label>
       
       <label class="filter-label checkbox-label">
         <input type="checkbox" id="filter-exclude-weeklies" class="filter-checkbox" />
-        EXCLUDE WEEKLIES
+        EXCLUDE WEEKLY EXPIRATIONS
       </label>
     </div>
 
@@ -126,36 +126,36 @@
         <thead>
           <tr>
             <th data-sort="ticker">TICKER <span class="sort-arrow"></span></th>
-            <th data-sort="expiration">EXP <span class="sort-arrow"></span></th>
+            <th data-sort="expiration">EXPIRY <span class="sort-arrow"></span></th>
             <th data-sort="strike">STRIKE <span class="sort-arrow"></span></th>
             <th data-sort="optionType">TYPE <span class="sort-arrow"></span></th>
             <th data-sort="volume">VOLUME <span class="sort-arrow"></span></th>
-            <th data-sort="openInterest">OI <span class="sort-arrow"></span></th>
+            <th data-sort="openInterest">OPEN INT <span class="sort-arrow"></span></th>
             <th data-sort="volOiRatio" class="active-sort">VOL/OI ▼</th>
-            <th data-sort="lastTradeDate">LAST TRADE <span class="sort-arrow"></span></th>
-            <th data-sort="side">ACTION <span class="sort-arrow"></span></th>
-            <th data-sort="impliedVolatility">IV% <span class="sort-arrow"></span></th>
+            <th data-sort="lastTradeDate">LAST EXEC <span class="sort-arrow"></span></th>
+            <th data-sort="side">FLOW SIDE <span class="sort-arrow"></span></th>
+            <th data-sort="impliedVolatility">IMPLIED VOL <span class="sort-arrow"></span></th>
             <th data-sort="underlierPrice">UNDERLIER <span class="sort-arrow"></span></th>
             <th>50d SMA</th>
             <th>200d SMA</th>
-            <th>TREND</th>
-            <th>EXP MOVE ±$</th>
+            <th>BIAS</th>
+            <th>EXPECTED RANGE</th>
           </tr>
         </thead>
         <tbody id="scanner-tbody">
-          <tr><td colspan="15" class="table-empty">[ INITIALIZING SCANNER... ]</td></tr>
+          <tr><td colspan="15" class="table-empty">[ INITIALIZING FEED... ]</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
-  <!-- ── WIDGET B: Put/Call Ratio Chart ──────────── -->
+  <!-- ── WIDGET B: Derivatives Volume Trend ──────────── -->
   <section class="card card-half" id="card-pcr">
     <div class="card-header">
       <div class="card-header-left">
-        <span class="card-icon">◉</span>
-        <h2 class="card-title">PUT/CALL RATIO TREND</h2>
-        <span class="card-badge accent-mag">WIDGET B</span>
+        <span class="card-icon">◇</span>
+        <h2 class="card-title">DERIVATIVES VOLUME TREND</h2>
+        <span class="card-badge accent-coral">TRENDS</span>
       </div>
       <div class="card-header-right">
         <div class="loading-indicator" id="pcr-loading"><span class="spinner"></span></div>
@@ -165,19 +165,19 @@
       <canvas id="chart-pcr"></canvas>
     </div>
     <div class="chart-legend">
-      <span class="legend-item" style="--c:#00E5FF">SPY</span>
-      <span class="legend-item" style="--c:#E040FB">QQQ</span>
-      <span class="legend-item" style="--c:#69FF47">IWM</span>
+      <span class="legend-item" style="--c:#E2E2E2">SPY</span>
+      <span class="legend-item" style="--c:#D4AF37">QQQ</span>
+      <span class="legend-item" style="--c:#BF5A5A">IWM</span>
     </div>
   </section>
 
-  <!-- ── WIDGET C: Volume Concentration ──────────── -->
+  <!-- ── WIDGET C: Expiration Volume Concentration ──── -->
   <section class="card card-half" id="card-volcon">
     <div class="card-header">
       <div class="card-header-left">
-        <span class="card-icon">▦</span>
-        <h2 class="card-title">VOLUME CONCENTRATION BY EXPIRY</h2>
-        <span class="card-badge accent-blue">WIDGET C</span>
+        <span class="card-icon">◇</span>
+        <h2 class="card-title">EXPIRATION VOLUME CONCENTRATION</h2>
+        <span class="card-badge accent-gold">CONCENTRATION</span>
       </div>
       <div class="card-header-right">
         <select id="volcon-ticker" class="filter-select">
@@ -191,36 +191,36 @@
       <canvas id="chart-volcon"></canvas>
     </div>
     <div class="chart-legend">
-      <span class="legend-item" style="--c:#00E5FF">CALLS</span>
-      <span class="legend-item" style="--c:#E040FB">PUTS</span>
+      <span class="legend-item" style="--c:#E2E2E2">CALLS</span>
+      <span class="legend-item" style="--c:#BF5A5A">PUTS</span>
     </div>
   </section>
 
-  <!-- ── EXTENSION 1: IV SandBox & Skew ──────────── -->
+  <!-- ── EXTENSION 1: Volatility Skew Profile ───────── -->
   <section class="card card-half" id="card-iv">
     <div class="card-header">
       <div class="card-header-left">
-        <span class="card-icon">◌</span>
-        <h2 class="card-title">IV SANDBOX & SKEW FINDER</h2>
-        <span class="card-badge accent-mag">EXT 1</span>
+        <span class="card-icon">◇</span>
+        <h2 class="card-title">VOLATILITY SKEW PROFILE</h2>
+        <span class="card-badge accent-coral">SKEW PROFILE</span>
       </div>
       <div class="card-header-right">
         <select id="iv-ticker" class="filter-select">
           <option>SPY</option><option>QQQ</option><option>AAPL</option>
           <option>NVDA</option><option>TSLA</option><option>AMD</option><option>IWM</option>
         </select>
-        <button class="btn-sm" id="btn-load-iv">LOAD</button>
+        <button class="btn-sm" id="btn-load-iv">LOAD VECTORS</button>
         <div class="loading-indicator" id="iv-loading"><span class="spinner"></span></div>
       </div>
     </div>
     <!-- IV Rank / Percentile gauges -->
     <div class="iv-gauges">
       <div class="iv-gauge-card">
-        <div class="gauge-label">30-DAY IV (HV)</div>
-        <div class="gauge-value accent-blue" id="iv-current">--%</div>
+        <div class="gauge-label">30-DAY IMPLIED VOL</div>
+        <div class="gauge-value accent-gold" id="iv-current">--%</div>
       </div>
       <div class="iv-gauge-card">
-        <div class="gauge-label">IV RANK</div>
+        <div class="gauge-label">IV RANK (12M)</div>
         <div class="gauge-value" id="iv-rank">--%</div>
         <div class="gauge-bar-bg">
           <div class="gauge-bar" id="iv-rank-bar"></div>
@@ -228,7 +228,7 @@
       </div>
       <div class="iv-gauge-card">
         <div class="gauge-label">IV PERCENTILE</div>
-        <div class="gauge-value accent-mag" id="iv-pct">--%</div>
+        <div class="gauge-value accent-coral" id="iv-pct">--%</div>
         <div class="gauge-bar-bg">
           <div class="gauge-bar gauge-bar-mag" id="iv-pct-bar"></div>
         </div>
@@ -240,31 +240,31 @@
     </div>
   </section>
 
-  <!-- ── EXTENSION 3: Expected Move Panel ──────────── -->
+  <!-- ── EXTENSION 3: Projected Valuation Boundaries ── -->
   <section class="card card-quarter" id="card-expmove">
     <div class="card-header">
       <div class="card-header-left">
-        <span class="card-icon">⊕</span>
-        <h2 class="card-title">EXPECTED MOVE CALCULATOR</h2>
-        <span class="card-badge accent-blue">EXT 3</span>
+        <span class="card-icon">◇</span>
+        <h2 class="card-title">PROJECTED VALUATION BOUNDARIES</h2>
+        <span class="card-badge accent-gold">BOUNDARIES</span>
       </div>
     </div>
     <div class="exp-move-grid" id="exp-move-grid">
-      <div class="exp-placeholder">[ SELECT ROWS IN SCANNER TO SEE EXPECTED MOVES ]</div>
+      <div class="exp-placeholder">[ SELECT CONTRACT FROM REGISTRY TO COMPUTE BOUNDS ]</div>
     </div>
   </section>
 
-  <!-- ── EXTENSION 2: Swing Alignment Panel ──────── -->
+  <!-- ── EXTENSION 2: Technical Trend Convergence ──── -->
   <section class="card card-quarter" id="card-swing">
     <div class="card-header">
       <div class="card-header-left">
-        <span class="card-icon">⚡</span>
-        <h2 class="card-title">SWING ALIGNMENT OVERLAY</h2>
-        <span class="card-badge accent-mag">EXT 2</span>
+        <span class="card-icon">◇</span>
+        <h2 class="card-title">TECHNICAL TREND CONVERGENCE</h2>
+        <span class="card-badge accent-coral">CONVERGENCE</span>
       </div>
     </div>
     <div id="swing-grid" class="swing-grid">
-      <div class="exp-placeholder">[ LOADING TECHNICALS... ]</div>
+      <div class="exp-placeholder">[ CALCULATING ALIGNMENT VECTORS... ]</div>
     </div>
   </section>
 
@@ -272,10 +272,10 @@
 
 <!-- ══════════════════════════════════════════════════
      FOOTER
-══════════════════════════════════════════════════ -->
+     ══════════════════════════════════════════════════ -->
 <footer class="site-footer">
-  <span>PROJECT: SCYLLA // C++ CORE ENGINE v1.0 &nbsp;|&nbsp; OpenBB ODP // yfinance &nbsp;|&nbsp; FOR EDUCATIONAL USE ONLY — NOT FINANCIAL ADVICE</span>
-  <span class="accent-blue">127.0.0.1:8080</span>
+  <span>PROJECT: SCYLLA // CORE ENGINE v1.0 — VOLATILITY TELEMETRY NETWORK — EDUCATIONAL SYSTEM ONLY</span>
+  <span class="accent-gold">127.0.0.1:8080</span>
 </footer>
 
 <script src="app.js"></script>
