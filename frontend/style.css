@@ -380,6 +380,14 @@ body {
   background: rgba(214, 175, 55, 0.05);
 }
 
+/* Selected active row highlight */
+.data-table tbody tr.active-row td {
+  border-top: 1px solid var(--accent) !important;
+  border-bottom: 1px solid var(--accent) !important;
+  background: rgba(214, 175, 55, 0.12) !important;
+  font-weight: 500;
+}
+
 .table-empty {
   text-align: center;
   color: var(--text-muted);

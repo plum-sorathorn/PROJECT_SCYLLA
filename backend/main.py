@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
-from routers import unusual_options, put_call_ratio, volume_concentration, iv_skew, technicals
+from routers import unusual_options, put_call_ratio, volume_concentration, iv_skew, technicals, ml_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scylla.backend")
@@ -32,6 +32,7 @@ app.include_router(put_call_ratio.router, prefix="/api/v1", tags=["Put/Call Rati
 app.include_router(volume_concentration.router, prefix="/api/v1", tags=["Volume Concentration"])
 app.include_router(iv_skew.router, prefix="/api/v1", tags=["IV Skew"])
 app.include_router(technicals.router, prefix="/api/v1", tags=["Technicals"])
+app.include_router(ml_model.router, prefix="/api/v1", tags=["ML Model"])
 
 # Compatibility routes for frontend calling directly in DEV MODE (without C++ Core running)
 app.include_router(unusual_options.router, prefix="/api", tags=["Scanner API"])
@@ -39,6 +40,7 @@ app.include_router(put_call_ratio.router, prefix="/api", tags=["Put/Call Ratio A
 app.include_router(volume_concentration.router, prefix="/api", tags=["Volume Concentration API"])
 app.include_router(iv_skew.router, prefix="/api", tags=["IV Skew API"])
 app.include_router(technicals.router, prefix="/api", tags=["Technicals API"])
+app.include_router(ml_model.router, prefix="/api", tags=["ML Model API"])
 
 
 @app.get("/health")

@@ -21,8 +21,8 @@
   <div class="header-brand">
     <div class="header-logo-glyph">⬡</div>
     <div class="header-title-group">
-      <h1 class="header-title">PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Tactical Console</span></h1>
-      <p class="header-sub">VOLATILITY & FLOW TELEMETRY — POWERED BY C++ CORE & OpenBB ODP</p>
+      <h1 class="header-title" id="header-title-text">PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Tactical Console</span></h1>
+      <p class="header-sub" id="header-sub-text">VOLATILITY & FLOW TELEMETRY — POWERED BY C++ CORE & OpenBB ODP</p>
     </div>
   </div>
   <div class="header-status">
@@ -35,6 +35,15 @@
       <span class="status-label">ODP FEED</span>
     </div>
     <div class="header-clock" id="header-clock">--:--:--</div>
+    
+    <!-- SPA Navigation Buttons -->
+    <a href="#ml" class="btn-refresh" style="text-decoration: none; background: transparent; border: 1px solid var(--accent); color: var(--accent);" id="btn-ml-cockpit" title="Open Machine Learning Cockpit">
+      ML COCKPIT
+    </a>
+    <a href="#tactical" class="btn-refresh" style="text-decoration: none; background: transparent; border: 1px solid var(--accent); color: var(--accent); display: none;" id="btn-console" title="Return to Tactical Console">
+      TACTICAL CONSOLE
+    </a>
+    
     <button class="btn-refresh" id="btn-refresh-all" title="Synchronize telemetry data">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 4px; vertical-align: middle;"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
       SYNCHRONIZE
@@ -43,232 +52,533 @@
 </header>
 
 <!-- ══════════════════════════════════════════════════
-     SUMMARY TELEMETRY STRIP
+     SUMMARY TELEMETRY STRIP (TACTICAL CONSOLE)
      ══════════════════════════════════════════════════ -->
-<section class="summary-strip">
-  <div class="summary-tile">
-    <span class="tile-label">WHALE BLOCKS</span>
-    <span class="tile-value accent-gold" id="sum-whales">--</span>
-  </div>
-  <div class="summary-tile">
-    <span class="tile-label">PEAK VOL / OI</span>
-    <span class="tile-value accent-gold" id="sum-maxvoloi">--</span>
-  </div>
-  <div class="summary-tile">
-    <span class="tile-label">MEAN RATIO</span>
-    <span class="tile-value" id="sum-avgvoloi">--</span>
-  </div>
-  <div class="summary-tile">
-    <span class="tile-label">AGGREGATE PCR</span>
-    <span class="tile-value" id="sum-agg-pcr">--</span>
-  </div>
-  <div class="summary-tile">
-    <span class="tile-label">CALL DISTRIBUTION</span>
-    <span class="tile-value accent-call" id="sum-callvol">--</span>
-  </div>
-  <div class="summary-tile">
-    <span class="tile-label">PUT DISTRIBUTION</span>
-    <span class="tile-value accent-put" id="sum-putvol">--</span>
-  </div>
-</section>
+<div id="tactical-summary-strip">
+  <section class="summary-strip">
+    <div class="summary-tile">
+      <span class="tile-label">WHALE BLOCKS</span>
+      <span class="tile-value accent-gold" id="sum-whales">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">PEAK VOL / OI</span>
+      <span class="tile-value accent-gold" id="sum-maxvoloi">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">MEAN RATIO</span>
+      <span class="tile-value" id="sum-avgvoloi">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">AGGREGATE PCR</span>
+      <span class="tile-value" id="sum-agg-pcr">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">CALL DISTRIBUTION</span>
+      <span class="tile-value accent-call" id="sum-callvol">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">PUT DISTRIBUTION</span>
+      <span class="tile-value accent-put" id="sum-putvol">--</span>
+    </div>
+  </section>
+</div>
 
 <!-- ══════════════════════════════════════════════════
-     MAIN DASHBOARD GRID
+     SUMMARY TELEMETRY STRIP (ML COCKPIT)
      ══════════════════════════════════════════════════ -->
-<main class="dashboard-grid">
+<div id="ml-summary-strip" style="display: none;">
+  <section class="summary-strip">
+    <div class="summary-tile">
+      <span class="tile-label">TOTAL LOGGED TRADES</span>
+      <span class="tile-value accent-gold" id="sum-total-trades">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">EVALUATION POOL</span>
+      <span class="tile-value accent-gold" id="sum-labeled-trades">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">HISTORICAL WIN RATE</span>
+      <span class="tile-value" id="sum-win-rate">--%</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">TRAIN ACCURACY</span>
+      <span class="tile-value accent-call" id="sum-train-acc">--%</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">MODEL GENERALIZATION</span>
+      <span class="tile-value accent-call" id="sum-test-acc">--%</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">CV ROC AUC</span>
+      <span class="tile-value accent-call" id="sum-cv-roc-auc">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">F1 SCORE</span>
+      <span class="tile-value accent-call" id="sum-test-f1">--</span>
+    </div>
+    <div class="summary-tile">
+      <span class="tile-label">PREDICTOR STATUS</span>
+      <span class="tile-value accent-gold" id="sum-model-status" style="font-size: 14px; font-family: var(--font-mono);">INITIALIZING</span>
+    </div>
+  </section>
+</div>
 
-  <!-- ── WIDGET A: Unusual Activity Registry ─────────── -->
-  <section class="card card-full" id="card-scanner">
-    <div class="card-header">
-      <div class="card-header-left">
-        <span class="card-icon">◇</span>
-        <h2 class="card-title">UNUSUAL ACTIVITY REGISTRY</h2>
-        <span class="card-badge accent-gold">REGISTRY</span>
+<!-- ══════════════════════════════════════════════════
+     TACTICAL CONSOLE VIEW
+     ══════════════════════════════════════════════════ -->
+<div id="view-tactical">
+  <main class="dashboard-grid">
+  
+    <!-- ── WIDGET A: Unusual Activity Registry ─────────── -->
+    <section class="card card-full" id="card-scanner">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">UNUSUAL ACTIVITY REGISTRY</h2>
+          <span class="card-badge accent-gold">REGISTRY</span>
+        </div>
+        <div class="card-header-right">
+          <label class="filter-label">MIN VOL/OI:
+            <input type="number" id="filter-minvoloi" class="filter-input" value="2" min="0" step="0.5" />
+          </label>
+          <button class="btn-sm" id="btn-apply-filter">APPLY VECTORS</button>
+          <div class="loading-indicator" id="scanner-loading">
+            <span class="spinner"></span> SCANNING IN PROCESS...
+          </div>
+        </div>
       </div>
-      <div class="card-header-right">
-        <label class="filter-label">MIN VOL/OI:
-          <input type="number" id="filter-minvoloi" class="filter-input" value="2" min="0" step="0.5" />
+  
+      <!-- Swing Trading Interactive Filters Bar -->
+      <div class="scanner-filters-bar">
+        <label class="filter-label">THRESHOLD DTE: <span id="val-min-dte" class="accent-gold">14</span>d
+          <input type="range" id="filter-min-dte" min="0" max="90" value="14" class="filter-slider" />
         </label>
-        <button class="btn-sm" id="btn-apply-filter">APPLY VECTORS</button>
-        <div class="loading-indicator" id="scanner-loading">
-          <span class="spinner"></span> SCANNING IN PROCESS...
+        
+        <label class="filter-label">MIN NOTIONAL: $
+          <input type="number" id="filter-min-premium" value="50000" min="0" step="5000" class="filter-input filter-input-large" />
+        </label>
+        
+        <label class="filter-label">MIN CONTRACT OI:
+          <input type="number" id="filter-min-oi" value="100" min="0" step="50" class="filter-input filter-input-large" />
+        </label>
+        
+        <label class="filter-label checkbox-label">
+          <input type="checkbox" id="filter-exclude-indices" class="filter-checkbox" />
+          EXCLUDE INDEX SECURITIES
+        </label>
+        
+        <label class="filter-label checkbox-label">
+          <input type="checkbox" id="filter-exclude-weeklies" class="filter-checkbox" />
+          EXCLUDE WEEKLY EXPIRATIONS
+        </label>
+      </div>
+  
+      <div class="table-wrapper">
+        <table class="data-table" id="scanner-table">
+          <thead>
+            <tr>
+              <th data-sort="ticker">TICKER <span class="sort-arrow"></span></th>
+              <th data-sort="expiration">EXPIRY <span class="sort-arrow"></span></th>
+              <th data-sort="strike">STRIKE <span class="sort-arrow"></span></th>
+              <th data-sort="optionType">TYPE <span class="sort-arrow"></span></th>
+              <th data-sort="volume">VOLUME <span class="sort-arrow"></span></th>
+              <th data-sort="openInterest">OPEN INT <span class="sort-arrow"></span></th>
+              <th data-sort="volOiRatio" class="active-sort">VOL/OI ▼</th>
+              <th data-sort="lastTradeDate">LAST EXEC <span class="sort-arrow"></span></th>
+              <th data-sort="side">FLOW SIDE <span class="sort-arrow"></span></th>
+              <th data-sort="impliedVolatility">IMPLIED VOL <span class="sort-arrow"></span></th>
+              <th data-sort="underlierPrice">UNDERLIER <span class="sort-arrow"></span></th>
+              <th>50d SMA</th>
+              <th>200d SMA</th>
+              <th>BIAS</th>
+              <th>EXPECTED RANGE</th>
+            </tr>
+          </thead>
+          <tbody id="scanner-tbody">
+            <tr><td colspan="15" class="table-empty">[ INITIALIZING FEED... ]</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  
+    <!-- ── WIDGET B: Derivatives Volume Trend ──────────── -->
+    <section class="card card-half" id="card-pcr">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">DERIVATIVES VOLUME TREND</h2>
+          <span class="card-badge accent-coral">TRENDS</span>
+        </div>
+        <div class="card-header-right">
+          <div class="loading-indicator" id="pcr-loading"><span class="spinner"></span></div>
         </div>
       </div>
-    </div>
-
-    <!-- Swing Trading Interactive Filters Bar -->
-    <div class="scanner-filters-bar">
-      <label class="filter-label">THRESHOLD DTE: <span id="val-min-dte" class="accent-gold">14</span>d
-        <input type="range" id="filter-min-dte" min="0" max="90" value="14" class="filter-slider" />
-      </label>
-      
-      <label class="filter-label">MIN NOTIONAL: $
-        <input type="number" id="filter-min-premium" value="50000" min="0" step="5000" class="filter-input filter-input-large" />
-      </label>
-      
-      <label class="filter-label">MIN CONTRACT OI:
-        <input type="number" id="filter-min-oi" value="100" min="0" step="50" class="filter-input filter-input-large" />
-      </label>
-      
-      <label class="filter-label checkbox-label">
-        <input type="checkbox" id="filter-exclude-indices" class="filter-checkbox" />
-        EXCLUDE INDEX SECURITIES
-      </label>
-      
-      <label class="filter-label checkbox-label">
-        <input type="checkbox" id="filter-exclude-weeklies" class="filter-checkbox" />
-        EXCLUDE WEEKLY EXPIRATIONS
-      </label>
-    </div>
-
-    <div class="table-wrapper">
-      <table class="data-table" id="scanner-table">
-        <thead>
-          <tr>
-            <th data-sort="ticker">TICKER <span class="sort-arrow"></span></th>
-            <th data-sort="expiration">EXPIRY <span class="sort-arrow"></span></th>
-            <th data-sort="strike">STRIKE <span class="sort-arrow"></span></th>
-            <th data-sort="optionType">TYPE <span class="sort-arrow"></span></th>
-            <th data-sort="volume">VOLUME <span class="sort-arrow"></span></th>
-            <th data-sort="openInterest">OPEN INT <span class="sort-arrow"></span></th>
-            <th data-sort="volOiRatio" class="active-sort">VOL/OI ▼</th>
-            <th data-sort="lastTradeDate">LAST EXEC <span class="sort-arrow"></span></th>
-            <th data-sort="side">FLOW SIDE <span class="sort-arrow"></span></th>
-            <th data-sort="impliedVolatility">IMPLIED VOL <span class="sort-arrow"></span></th>
-            <th data-sort="underlierPrice">UNDERLIER <span class="sort-arrow"></span></th>
-            <th>50d SMA</th>
-            <th>200d SMA</th>
-            <th>BIAS</th>
-            <th>EXPECTED RANGE</th>
-          </tr>
-        </thead>
-        <tbody id="scanner-tbody">
-          <tr><td colspan="15" class="table-empty">[ INITIALIZING FEED... ]</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- ── WIDGET B: Derivatives Volume Trend ──────────── -->
-  <section class="card card-half" id="card-pcr">
-    <div class="card-header">
-      <div class="card-header-left">
-        <span class="card-icon">◇</span>
-        <h2 class="card-title">DERIVATIVES VOLUME TREND</h2>
-        <span class="card-badge accent-coral">TRENDS</span>
+      <div class="chart-container">
+        <canvas id="chart-pcr"></canvas>
       </div>
-      <div class="card-header-right">
-        <div class="loading-indicator" id="pcr-loading"><span class="spinner"></span></div>
+      <div class="chart-legend">
+        <span class="legend-item" style="--c:#E2E2E2">SPY</span>
+        <span class="legend-item" style="--c:#D4AF37">QQQ</span>
+        <span class="legend-item" style="--c:#BF5A5A">IWM</span>
       </div>
-    </div>
-    <div class="chart-container">
-      <canvas id="chart-pcr"></canvas>
-    </div>
-    <div class="chart-legend">
-      <span class="legend-item" style="--c:#E2E2E2">SPY</span>
-      <span class="legend-item" style="--c:#D4AF37">QQQ</span>
-      <span class="legend-item" style="--c:#BF5A5A">IWM</span>
-    </div>
-  </section>
-
-  <!-- ── WIDGET C: Expiration Volume Concentration ──── -->
-  <section class="card card-half" id="card-volcon">
-    <div class="card-header">
-      <div class="card-header-left">
-        <span class="card-icon">◇</span>
-        <h2 class="card-title">EXPIRATION VOLUME CONCENTRATION</h2>
-        <span class="card-badge accent-gold">CONCENTRATION</span>
-      </div>
-      <div class="card-header-right">
-        <select id="volcon-ticker" class="filter-select">
-          <option>SPY</option><option>QQQ</option><option>AAPL</option>
-          <option>NVDA</option><option>TSLA</option><option>IWM</option>
-        </select>
-        <div class="loading-indicator" id="volcon-loading"><span class="spinner"></span></div>
-      </div>
-    </div>
-    <div class="chart-container">
-      <canvas id="chart-volcon"></canvas>
-    </div>
-    <div class="chart-legend">
-      <span class="legend-item" style="--c:#E2E2E2">CALLS</span>
-      <span class="legend-item" style="--c:#BF5A5A">PUTS</span>
-    </div>
-  </section>
-
-  <!-- ── EXTENSION 1: Volatility Skew Profile ───────── -->
-  <section class="card card-half" id="card-iv">
-    <div class="card-header">
-      <div class="card-header-left">
-        <span class="card-icon">◇</span>
-        <h2 class="card-title">VOLATILITY SKEW PROFILE</h2>
-        <span class="card-badge accent-coral">SKEW PROFILE</span>
-      </div>
-      <div class="card-header-right">
-        <select id="iv-ticker" class="filter-select">
-          <option>SPY</option><option>QQQ</option><option>AAPL</option>
-          <option>NVDA</option><option>TSLA</option><option>AMD</option><option>IWM</option>
-        </select>
-        <button class="btn-sm" id="btn-load-iv">LOAD VECTORS</button>
-        <div class="loading-indicator" id="iv-loading"><span class="spinner"></span></div>
-      </div>
-    </div>
-    <!-- IV Rank / Percentile gauges -->
-    <div class="iv-gauges">
-      <div class="iv-gauge-card">
-        <div class="gauge-label">30-DAY IMPLIED VOL</div>
-        <div class="gauge-value accent-gold" id="iv-current">--%</div>
-      </div>
-      <div class="iv-gauge-card">
-        <div class="gauge-label">IV RANK (12M)</div>
-        <div class="gauge-value" id="iv-rank">--%</div>
-        <div class="gauge-bar-bg">
-          <div class="gauge-bar" id="iv-rank-bar"></div>
+    </section>
+  
+    <!-- ── WIDGET C: Expiration Volume Concentration ──── -->
+    <section class="card card-half" id="card-volcon">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">EXPIRATION VOLUME CONCENTRATION</h2>
+          <span class="card-badge accent-gold">CONCENTRATION</span>
+        </div>
+        <div class="card-header-right">
+          <select id="volcon-ticker" class="filter-select">
+            <option>SPY</option><option>QQQ</option><option>AAPL</option>
+            <option>NVDA</option><option>TSLA</option><option>IWM</option>
+          </select>
+          <div class="loading-indicator" id="volcon-loading"><span class="spinner"></span></div>
         </div>
       </div>
-      <div class="iv-gauge-card">
-        <div class="gauge-label">IV PERCENTILE</div>
-        <div class="gauge-value accent-coral" id="iv-pct">--%</div>
-        <div class="gauge-bar-bg">
-          <div class="gauge-bar gauge-bar-mag" id="iv-pct-bar"></div>
+      <div class="chart-container">
+        <canvas id="chart-volcon"></canvas>
+      </div>
+      <div class="chart-legend">
+        <span class="legend-item" style="--c:#E2E2E2">CALLS</span>
+        <span class="legend-item" style="--c:#BF5A5A">PUTS</span>
+      </div>
+    </section>
+  
+    <!-- ── EXTENSION 1: Volatility Skew Profile ───────── -->
+    <section class="card card-half" id="card-iv">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">VOLATILITY SKEW PROFILE</h2>
+          <span class="card-badge accent-coral">SKEW PROFILE</span>
+        </div>
+        <div class="card-header-right">
+          <select id="iv-ticker" class="filter-select">
+            <option>SPY</option><option>QQQ</option><option>AAPL</option>
+            <option>NVDA</option><option>TSLA</option><option>AMD</option><option>IWM</option>
+          </select>
+          <button class="btn-sm" id="btn-load-iv">LOAD VECTORS</button>
+          <div class="loading-indicator" id="iv-loading"><span class="spinner"></span></div>
         </div>
       </div>
-    </div>
-    <!-- Volatility Smile chart -->
-    <div class="chart-container chart-container-sm">
-      <canvas id="chart-ivsmile"></canvas>
-    </div>
-  </section>
-
-  <!-- ── EXTENSION 3: Projected Valuation Boundaries ── -->
-  <section class="card card-quarter" id="card-expmove">
-    <div class="card-header">
-      <div class="card-header-left">
-        <span class="card-icon">◇</span>
-        <h2 class="card-title">PROJECTED VALUATION BOUNDARIES</h2>
-        <span class="card-badge accent-gold">BOUNDARIES</span>
+      <!-- IV Rank / Percentile gauges -->
+      <div class="iv-gauges">
+        <div class="iv-gauge-card">
+          <div class="gauge-label">30-DAY IMPLIED VOL</div>
+          <div class="gauge-value accent-gold" id="iv-current">--%</div>
+        </div>
+        <div class="iv-gauge-card">
+          <div class="gauge-label">IV RANK (12M)</div>
+          <div class="gauge-value" id="iv-rank">--%</div>
+          <div class="gauge-bar-bg">
+            <div class="gauge-bar" id="iv-rank-bar"></div>
+          </div>
+        </div>
+        <div class="iv-gauge-card">
+          <div class="gauge-label">IV PERCENTILE</div>
+          <div class="gauge-value accent-coral" id="iv-pct">--%</div>
+          <div class="gauge-bar-bg">
+            <div class="gauge-bar gauge-bar-mag" id="iv-pct-bar"></div>
+          </div>
+        </div>
       </div>
-    </div>
-    <div class="exp-move-grid" id="exp-move-grid">
-      <div class="exp-placeholder">[ SELECT CONTRACT FROM REGISTRY TO COMPUTE BOUNDS ]</div>
-    </div>
-  </section>
-
-  <!-- ── EXTENSION 2: Technical Trend Convergence ──── -->
-  <section class="card card-quarter" id="card-swing">
-    <div class="card-header">
-      <div class="card-header-left">
-        <span class="card-icon">◇</span>
-        <h2 class="card-title">TECHNICAL TREND CONVERGENCE</h2>
-        <span class="card-badge accent-coral">CONVERGENCE</span>
+      <!-- Volatility Smile chart -->
+      <div class="chart-container chart-container-sm">
+        <canvas id="chart-ivsmile"></canvas>
       </div>
-    </div>
-    <div id="swing-grid" class="swing-grid">
-      <div class="exp-placeholder">[ CALCULATING ALIGNMENT VECTORS... ]</div>
-    </div>
-  </section>
+    </section>
+  
+    <!-- ── EXTENSION 3: Projected Valuation Boundaries ── -->
+    <section class="card card-quarter" id="card-expmove">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">PROJECTED VALUATION BOUNDARIES</h2>
+          <span class="card-badge accent-gold">BOUNDARIES</span>
+        </div>
+      </div>
+      <div class="exp-move-grid" id="exp-move-grid">
+        <div class="exp-placeholder">[ SELECT CONTRACT FROM REGISTRY TO COMPUTE BOUNDS ]</div>
+      </div>
+    </section>
+  
+    <!-- ── EXTENSION 2: Technical Trend Convergence ──── -->
+    <section class="card card-quarter" id="card-swing">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">TECHNICAL TREND CONVERGENCE</h2>
+          <span class="card-badge accent-coral">CONVERGENCE</span>
+        </div>
+      </div>
+      <div id="swing-grid" class="swing-grid">
+        <div class="exp-placeholder">[ CALCULATING ALIGNMENT VECTORS... ]</div>
+      </div>
+    </section>
+  
+  </main>
+</div>
 
-</main>
+<!-- ══════════════════════════════════════════════════
+     MACHINE LEARNING COCKPIT VIEW
+     ══════════════════════════════════════════════════ -->
+<div id="view-ml" style="display: none;">
+  <main class="dashboard-grid">
+  
+    <!-- ── CARD 1: Manual Inference Console ────────────── -->
+    <section class="card card-half" id="card-inference">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">LIVE TRADE INFERENCE CONSOLE</h2>
+          <span class="card-badge accent-gold">PREDICTION</span>
+        </div>
+      </div>
+      
+      <div class="ml-form-wrapper" style="padding-top: 10px; padding: 16px;">
+        <form id="inference-form" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">UNDERLIER PRICE ($)</label>
+            <input type="number" id="inf-underlier" value="500.0" step="any" class="filter-input" style="width: 100%;" required />
+          </div>
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">STRIKE PRICE ($)</label>
+            <input type="number" id="inf-strike" value="510.0" step="any" class="filter-input" style="width: 100%;" required />
+          </div>
+          
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">OPTION TYPE</label>
+            <select id="inf-type" class="filter-select" style="width: 100%;">
+              <option value="Call">CALL</option>
+              <option value="Put">PUT</option>
+            </select>
+          </div>
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">FLOW SIDE</label>
+            <select id="inf-side" class="filter-select" style="width: 100%;">
+              <option value="BUY">BUY (ASK)</option>
+              <option value="SELL">SELL (BID)</option>
+              <option value="MID">MID</option>
+            </select>
+          </div>
+          
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">DAYS TO EXPIRATION (DTE)</label>
+            <input type="number" id="inf-dte" value="30" min="1" step="any" class="filter-input" style="width: 100%;" required />
+          </div>
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">VOL / OI RATIO</label>
+            <input type="number" id="inf-ratio" value="5.5" step="any" class="filter-input" style="width: 100%;" required />
+          </div>
+          
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">IMPLIED VOLATILITY (IV %)</label>
+            <input type="number" id="inf-iv" value="35.0" step="any" class="filter-input" style="width: 100%;" required />
+          </div>
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">VOLUME (CONTRACTS)</label>
+            <input type="number" id="inf-volume" value="1000" step="any" class="filter-input" style="width: 100%;" required />
+          </div>
+          
+          <div class="form-group" style="display: flex; flex-direction: column; grid-column: span 2;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">PREMIUM NOTIONAL ($)</label>
+            <input type="number" id="inf-premium" value="250000" step="any" class="filter-input" style="width: 100%;" required />
+          </div>
+
+          <div class="form-group checkbox-label" style="grid-column: span 2; display: flex; align-items: center; gap: 8px; margin-top: 4px; margin-left: 0;">
+            <input type="checkbox" id="inf-autocalc" class="filter-checkbox" checked />
+            <label for="inf-autocalc" style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); cursor: pointer; user-select: none;">
+              AUTO-CALCULATE THEORETICAL PREMIUM NOTIONAL (BLACK-SCHOLES)
+            </label>
+          </div>
+          
+          <div class="form-group" style="display: flex; flex-direction: column; grid-column: span 2;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">TREND ALIGNMENT BIAS</label>
+            <select id="inf-trend" class="filter-select" style="width: 100%;">
+              <option value="BULL_ALIGNED">BULL ALIGNED (Above 50d & 200d SMA)</option>
+              <option value="BEAR_ALIGNED">BEAR ALIGNED (Below 50d or 200d SMA)</option>
+              <option value="BULL_CONTRARIAN">BULL CONTRARIAN (Call flow on Bear trend)</option>
+              <option value="NEUTRAL">NEUTRAL</option>
+            </select>
+          </div>
+          
+          <button type="submit" class="btn-refresh" style="grid-column: span 2; margin-top: 8px; justify-content: center; height: 35px; font-size: 12px; letter-spacing: 1px;">
+            CALCULATE SUCCESS PROBABILITY VECTOR
+          </button>
+        </form>
+      </div>
+      
+      <div class="prediction-result-panel" style="margin: 16px; padding: 16px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <h4 style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px;">ESTIMATED PROBABILITY OF SUCCESS</h4>
+          <div id="prediction-target-profile" style="font-family: var(--font-mono); font-size: 10px; color: var(--accent); margin-top: 4px;">TARGET PROFILE: CUSTOM MANUAL PARAMETERS</div>
+          <p style="font-size: 12px; color: var(--text); margin-top: 4px;">Model Engine: <span id="model-type-badge" class="accent-gold" style="font-family: var(--font-mono); font-size: 10px;">HEURISTIC FALLBACK</span></p>
+        </div>
+        <div id="prediction-gauge-wrapper" style="text-align: right;">
+          <span id="prediction-percentage" style="font-family: var(--font-mono); font-size: 42px; font-weight: 600; line-height: 1; color: var(--accent);">--%</span>
+        </div>
+      </div>
+    </section>
+  
+    <!-- ── CARD: Dynamic Horizon Configuration ────────────── -->
+    <section class="card card-half" id="card-settings">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">EVALUATION HORIZON SETTINGS</h2>
+          <span class="card-badge accent-gold">CONFIG</span>
+        </div>
+      </div>
+      
+      <div style="padding: 16px;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">EVALUATION HORIZON (DAYS)</label>
+            <select id="cfg-horizon" class="filter-select" style="width: 100%;">
+              <option value="5">5</option>
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="30">30</option>
+              <option value="45">45</option>
+              <option value="60">60</option>
+              <option value="90">90</option>
+            </select>
+          </div>
+          <div class="form-group" style="display: flex; flex-direction: column;">
+            <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">TARGET RETURN THRESHOLD (%)</label>
+            <select id="cfg-threshold" class="filter-select" style="width: 100%;">
+              <option value="0.02">2%</option>
+              <option value="0.03">3%</option>
+              <option value="0.05">5%</option>
+              <option value="0.10">10%</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top: 16px; display: flex; align-items: center; justify-content: space-between;">
+          <button class="btn-refresh" id="btn-save-settings">PERSIST CONFIGURATION</button>
+          <span id="settings-status" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);"></span>
+        </div>
+      </div>
+    </section>
+  
+    <!-- ── CARD 2: Model Performance & Pipeline Controller ── -->
+    <section class="card card-half" id="card-pipeline">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">PIPELINE CONTROLLER & FEATURE IMPORTANCE</h2>
+          <span class="card-badge accent-coral">ML OPS</span>
+        </div>
+      </div>
+      
+      <div style="padding: 16px;">
+        <div class="pipeline-actions" style="display: flex; gap: 12px; flex-wrap: wrap;">
+          <button class="btn-refresh" id="btn-run-labeling" style="flex: 1; justify-content: center; background: transparent; border: 1px solid var(--border); color: var(--text);">
+            1. RUN HISTORICAL LABELING WORKER
+          </button>
+          <button class="btn-refresh" id="btn-trigger-retrain" style="flex: 1; justify-content: center;">
+            2. RETRAIN ML PREDICTION MODEL
+          </button>
+        </div>
+        
+        <p style="font-size: 11px; color: var(--text-muted); margin-top: 8px; font-style: italic;">
+          Note: Labeling fetches yfinance price history based on the configured horizon. Seeding mock history is performed if the dataset is small. Horizon and threshold can be updated in the EVALUATION HORIZON SETTINGS.
+        </p>
+    
+        <div class="feature-importance-section" style="margin-top: 20px;">
+          <h3 style="font-family: var(--font-brand); font-size: 18px; font-weight: 400; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 12px;">MODEL FEATURE WEIGHTS</h3>
+          
+          <div id="feature-list-wrapper" style="display: flex; flex-direction: column; gap: 10px;">
+            <!-- Filled by JS -->
+            <div class="exp-placeholder" style="padding: 10px 0;">[ TRAIN MODEL TO COMPUTE FEATURE IMPORTANCES ]</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  
+    <!-- ── CARD: Training Runs History ──────────────────── -->
+    <section class="card card-full" id="card-training-runs">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">MLOPS TRAINING RUN AUDIT LOG</h2>
+          <span class="card-badge accent-coral">AUDIT</span>
+        </div>
+      </div>
+      
+      <div style="padding: 16px;">
+        <div style="margin-bottom: 16px; height: 200px;">
+          <canvas id="chart-training-runs"></canvas>
+        </div>
+    
+        <div class="table-wrapper">
+          <table class="data-table" id="training-runs-table">
+            <thead>
+              <tr>
+                <th>TIMESTAMP</th>
+                <th>SAMPLES</th>
+                <th>TRAIN ACC</th>
+                <th>TEST ACC</th>
+                <th>PRECISION</th>
+                <th>RECALL</th>
+                <th>F1</th>
+                <th>ROC AUC</th>
+                <th>CV AUC</th>
+              </tr>
+            </thead>
+            <tbody id="training-runs-tbody">
+              <tr><td colspan="9" class="table-empty">[ RETRIEVING TRAINING LOGS... ]</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  
+    <!-- ── CARD 3: Historical Evaluation Ledger ────────── -->
+    <section class="card card-full" id="card-ledger">
+      <div class="card-header">
+        <div class="card-header-left">
+          <span class="card-icon">◇</span>
+          <h2 class="card-title">HISTORICAL EVALUATION LEDGER</h2>
+          <span class="card-badge accent-gold">LEDGER</span>
+        </div>
+        <div class="card-header-right">
+          <div class="loading-indicator" id="ledger-loading">
+            <span class="spinner"></span> RETRIEVING DATA VECTORS...
+          </div>
+        </div>
+      </div>
+  
+      <div class="table-wrapper">
+        <table class="data-table" id="ledger-table">
+          <thead>
+            <tr>
+              <th>LOG DATE</th>
+              <th>TICKER</th>
+              <th>EXPIRY</th>
+              <th>STRIKE</th>
+              <th>TYPE</th>
+              <th>VOL/OI</th>
+              <th>PREMIUM</th>
+              <th>UNDERLIER START</th>
+              <th>EVALUATION DATE</th>
+              <th>OBSERVED RETURN</th>
+              <th>OUTCOME STATUS</th>
+            </tr>
+          </thead>
+          <tbody id="ledger-tbody">
+            <tr><td colspan="11" class="table-empty">[ INITIALIZING FEED... ]</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  
+  </main>
+</div>
 
 <!-- ══════════════════════════════════════════════════
      FOOTER

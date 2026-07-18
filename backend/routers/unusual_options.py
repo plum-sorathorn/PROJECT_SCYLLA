@@ -4,7 +4,7 @@ Fetches EOD unusual options activity using OpenBB + yfinance.
 Returns ticker, expiry, strike, type, volume, OI, vol/OI ratio, underlyer price, SMA flags, expected move.
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, BackgroundTasks
 from typing import List
 import pandas as pd
 import numpy as np
@@ -270,6 +270,7 @@ def get_scanner(
     tickers: str = Query(default=",".join(SCAN_TICKERS), description="Comma-separated ticker list"),
     min_vol_oi: float = Query(default=2.0, description="Minimum Vol/OI ratio filter"),
     limit: int = Query(default=100, description="Max rows returned"),
+    background_tasks: BackgroundTasks = None,
 ):
     """
     C++ Compatibility endpoint: returns processed options flow with whale signals,
@@ -360,6 +361,32 @@ def get_scanner(
         "aggregatePCR": aggregate_pcr,
         "whaleSignalCount": whales,
     }
+
+    # Automatically log whale signals to ML Database in background
+    if background_tasks:
+        try:
+            from routers.ml_model import TradeSchema, api_log_trade
+            for row in processed:
+                if row.get("isWhaleSignal") or row.get("volOiRatio", 0) >= 5.0:
+                    trade_schema_data = TradeSchema(
+                        ticker=row["ticker"],
+                        expiration=row["expiration"],
+                        strike=row["strike"],
+                        optionType=row["optionType"],
+                        volume=row["volume"],
+                        openInterest=row["openInterest"],
+                        volOiRatio=row["volOiRatio"],
+                        impliedVolatility=row["impliedVolatility"],
+                        underlierPrice=row["underlierPrice"],
+                        premium=row["premium"],
+                        side=row["side"],
+                        dte=row["dte"],
+                        isWeekly=row["isWeekly"],
+                        trendAlignment=row["trendAlignment"]
+                    )
+                    background_tasks.add_task(api_log_trade, trade_schema_data)
+        except Exception as e:
+            logger.warning(f"Failed to enqueue trade logging: {e}")
 
     return {
         "data": processed,
