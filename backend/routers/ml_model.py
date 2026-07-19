@@ -96,7 +96,8 @@ def init_db():
             label_success INTEGER DEFAULT NULL,
             observed_return REAL DEFAULT NULL,
             max_adverse_return REAL DEFAULT NULL,
-            evaluation_date TEXT DEFAULT NULL
+            evaluation_date TEXT DEFAULT NULL,
+            is_synthetic INTEGER NOT NULL DEFAULT 0
         )
     """)
 
@@ -141,6 +142,16 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    try:
+        cursor.execute("ALTER TABLE options_trades ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        # Backfill mock trades
+        cursor.execute("UPDATE options_trades SET is_synthetic = 1 WHERE expiration = '2026-08-20' AND volume = 1000 AND open_interest = 200")
+        conn.commit()
+        logger.info("Migrated options_trades: added is_synthetic and backfilled 100 mock trades.")
+    except sqlite3.OperationalError:
+        pass
+
     for q_col in ["pinball_loss_p10", "pinball_loss_p25", "pinball_loss_p50", "pinball_loss_p75", "pinball_loss_p90"]:
         try:
             cursor.execute(f"ALTER TABLE model_runs ADD COLUMN {q_col} REAL DEFAULT NULL")
@@ -148,6 +159,17 @@ def init_db():
             pass
 
     conn.commit()
+
+    # Startup/health-check log line reporting counts
+    try:
+        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE is_synthetic = 1")
+        synth_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE is_synthetic = 0")
+        real_count = cursor.fetchone()[0]
+        logger.info(f"Database health check: options_trades has {real_count} real trades (is_synthetic=0) and {synth_count} synthetic trades (is_synthetic=1).")
+    except Exception as e:
+        logger.warning(f"Failed to count synthetic vs real trades during startup: {e}")
+
     conn.close()
 
 
@@ -322,6 +344,14 @@ def api_get_model_runs(limit: int = 50):
         # Replace NaN/NaT with None for JSON compliance
         df = df.where(pd.notnull(df), None)
         runs = df.to_dict(orient="records")
+        
+        # Clean up any potential float nan/inf values to guarantee JSON compliance
+        import math
+        for run in runs:
+            for k, v in run.items():
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    run[k] = None
+                    
         return {"data": runs, "count": len(runs)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -353,8 +383,8 @@ def api_log_trade(trade: TradeSchema):
             INSERT INTO options_trades (
                 timestamp, ticker, expiration, strike, option_type, volume, 
                 open_interest, vol_oi_ratio, implied_vol, underlier_price, 
-                premium, side, dte, is_weekly, trend_alignment
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                premium, side, dte, is_weekly, trend_alignment, is_synthetic
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         """, (
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             trade.ticker.upper(),
@@ -377,6 +407,178 @@ def api_log_trade(trade: TradeSchema):
         return {"status": "success", "message": f"Logged trade for {trade.ticker}"}
     except Exception as e:
         logger.error(f"Failed to log trade: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/ml/open-trades")
+def api_get_open_trades():
+    try:
+        settings = _get_settings()
+        target_pct = float(settings.get("profit_threshold", "0.03"))
+        
+        conn = sqlite3.connect(DB_PATH)
+        query = "SELECT * FROM options_trades WHERE labeled = 0 AND is_synthetic = 0 ORDER BY timestamp DESC"
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        highest_prob_trade = None
+        max_p_success = -1.0
+        
+        if not df.empty:
+            df['predicted_p10'] = None
+            df['predicted_p25'] = None
+            df['predicted_p50'] = None
+            df['predicted_p75'] = None
+            df['predicted_p90'] = None
+            df['predicted_strategy'] = None
+            df['p_success'] = None
+            df['kelly_fraction'] = None
+            
+            models = None
+            if os.path.exists(MODEL_PATH):
+                try:
+                    models = joblib.load(MODEL_PATH)
+                    if not isinstance(models, dict) or not all(q in models for q in [0.1, 0.25, 0.5, 0.75, 0.9]):
+                        models = None
+                except Exception:
+                    models = None
+                    
+            try:
+                horizon_days = int(settings.get("horizon_days", "10"))
+                
+                # Fetch vix and populate caches
+                _fetch_vix_level()
+                for t in df['ticker'].unique():
+                    try:
+                        _fetch_historical_volatility(t)
+                    except Exception:
+                        pass
+                        
+                feature_rows = []
+                for _, row in df.iterrows():
+                    row_data = {
+                        'ticker': row['ticker'].upper(),
+                        'strike': row['strike'],
+                        'volume': row['volume'],
+                        'open_interest': row['open_interest'],
+                        'vol_oi_ratio': row['vol_oi_ratio'],
+                        'implied_vol': row['implied_vol'],
+                        'underlier_price': row['underlier_price'],
+                        'premium': row['premium'],
+                        'dte': row['dte'],
+                        'option_type': row['option_type'],
+                        'side': row['side'],
+                        'trend_alignment': row['trend_alignment']
+                    }
+                    
+                    row_data['moneyness'] = (row['strike'] - row['underlier_price']) / row['underlier_price']
+                    row_data['iv_hv_ratio'] = 1.0
+                    hv = _hv_cache.get(row_data['ticker'], 0.0)
+                    if hv > 0:
+                        row_data['iv_hv_ratio'] = row_data['implied_vol'] / hv
+                        
+                    row_data['vix_level'] = _vix_cache.get("value") or 20.0
+                    row_data['log_premium'] = float(np.log1p(max(row['premium'], 0)))
+                    row_data['dte_bucket'] = _dte_to_bucket(row['dte'])
+                    
+                    feature_rows.append(row_data)
+                
+                if feature_rows:
+                    feat_df = pd.DataFrame(feature_rows)
+                    
+                    predicted_p10s = []
+                    predicted_p25s = []
+                    predicted_p50s = []
+                    predicted_p75s = []
+                    predicted_p90s = []
+                    predicted_strategies = []
+                    p_successes = []
+                    kellys = []
+                    
+                    if models is not None:
+                        p10_preds = models[0.1].predict(feat_df)
+                        p25_preds = models[0.25].predict(feat_df)
+                        p50_preds = models[0.5].predict(feat_df)
+                        p75_preds = models[0.75].predict(feat_df)
+                        p90_preds = models[0.9].predict(feat_df)
+                    
+                    for i in range(len(df)):
+                        row = df.iloc[i]
+                        tk = row['ticker'].upper()
+                        tk_hv = _hv_cache.get(tk, 0.0)
+                        hv_dec = tk_hv / 100.0
+                        ticker_hv_30d = hv_dec * np.sqrt(horizon_days / 252.0)
+                        if ticker_hv_30d <= 0.0:
+                            ticker_hv_30d = 0.04
+                            
+                        iqr_threshold = 1.5 * ticker_hv_30d
+                        direction_threshold = 0.25 * ticker_hv_30d
+                        
+                        if models is not None:
+                            q_preds = {
+                                "p10": float(p10_preds[i]),
+                                "p25": float(p25_preds[i]),
+                                "p50": float(p50_preds[i]),
+                                "p75": float(p75_preds[i]),
+                                "p90": float(p90_preds[i])
+                            }
+                            q_preds = enforce_monotonic_quantiles(q_preds)
+                            p_succ = compute_calibrated_p_success(
+                                target_pct,
+                                q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
+                            )
+                            capped_kelly, _ = kelly_fraction(p_succ, q_preds["p50"], q_preds["p10"], q_preds["p90"])
+                            strat, _ = classify_strategy(q_preds["p50"], q_preds["p10"], q_preds["p90"], iqr_threshold, direction_threshold)
+                        else:
+                            # Heuristic fallback path
+                            score = 0.50
+                            if row['trend_alignment'] == 'BULL_ALIGNED':
+                                score += 0.15
+                            if row['side'] == 'BUY':
+                                score += 0.05
+                            p_succ = min(score, 0.95)
+                            
+                            median_val = 0.03
+                            q_preds = {
+                                "p10": median_val - 0.05,
+                                "p25": median_val - 0.025,
+                                "p50": median_val,
+                                "p75": median_val + 0.025,
+                                "p90": median_val + 0.05
+                            }
+                            capped_kelly, _ = kelly_fraction(p_succ, q_preds["p50"], q_preds["p10"], q_preds["p90"])
+                            strat, _ = classify_strategy(q_preds["p50"], q_preds["p10"], q_preds["p90"], iqr_threshold, direction_threshold)
+                            
+                        predicted_p10s.append(round(q_preds["p10"], 4))
+                        predicted_p25s.append(round(q_preds["p25"], 4))
+                        predicted_p50s.append(round(q_preds["p50"], 4))
+                        predicted_p75s.append(round(q_preds["p75"], 4))
+                        predicted_p90s.append(round(q_preds["p90"], 4))
+                        predicted_strategies.append(strat)
+                        p_successes.append(round(p_succ, 4))
+                        kellys.append(round(capped_kelly, 4))
+                        
+                    df['predicted_p10'] = predicted_p10s
+                    df['predicted_p25'] = predicted_p25s
+                    df['predicted_p50'] = predicted_p50s
+                    df['predicted_p75'] = predicted_p75s
+                    df['predicted_p90'] = predicted_p90s
+                    df['predicted_strategy'] = predicted_strategies
+                    df['p_success'] = p_successes
+                    df['kelly_fraction'] = kellys
+                    
+            except Exception as pred_ex:
+                logger.warning(f"Failed to compute dynamic predictions in api_get_open_trades: {pred_ex}")
+            
+        df = df.where(pd.notnull(df), None)
+        trades = df.to_dict(orient="records")
+        
+        for t in trades:
+            if t.get('p_success') is not None and t['p_success'] > max_p_success:
+                max_p_success = t['p_success']
+                highest_prob_trade = t
+                
+        return {"data": trades, "count": len(trades), "highest_probability": highest_prob_trade}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/ml/trades")
@@ -700,8 +902,8 @@ def api_train_model():
                     INSERT INTO options_trades (
                         timestamp, ticker, expiration, strike, option_type, volume, 
                         open_interest, vol_oi_ratio, implied_vol, underlier_price, 
-                        premium, side, dte, is_weekly, trend_alignment, labeled, label_success, observed_return, max_adverse_return, evaluation_date
-                    ) VALUES (?, ?, '2026-08-20', ?, ?, 1000, 200, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?)
+                        premium, side, dte, is_weekly, trend_alignment, labeled, label_success, observed_return, max_adverse_return, evaluation_date, is_synthetic
+                    ) VALUES (?, ?, '2026-08-20', ?, ?, 1000, 200, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?, 1)
                 """, (
                     historical_date, ticker, strike, opt_type, vol_oi, iv, underlier, premium, side, dte, trend, success, observed_ret, max_adverse, eval_date
                 ))
@@ -1106,3 +1308,558 @@ def api_get_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# BACKTESTER
+# ═══════════════════════════════════════════════════════════════
+
+def get_real_trades(conn, **filters) -> pd.DataFrame:
+    """
+    Shared query helper that pulls options_trades with is_synthetic = 0.
+    Always appends WHERE is_synthetic=0.
+    """
+    query = "SELECT * FROM options_trades WHERE is_synthetic = 0"
+    params = []
+    for k, v in filters.items():
+        query += f" AND {k} = ?"
+        params.append(v)
+    query += " ORDER BY timestamp ASC"
+    return pd.read_sql_query(query, conn, params=params)
+
+
+class BacktestRequestSchema(BaseModel):
+    mode: Optional[str] = "walkforward"
+    initial_capital: Optional[float] = 100000.0
+    prob_threshold: Optional[float] = 0.60
+    kelly_multiplier: Optional[float] = 0.5
+    kelly_cap: Optional[float] = 0.25
+    stop_lambda: Optional[float] = 1.2
+    max_risk_pct_per_trade: Optional[float] = 0.02
+    walkforward_train_window: Optional[int] = 50
+    walkforward_test_increment: Optional[int] = 10
+    confirm_direct_dev: Optional[bool] = False
+    strategy_type: Optional[str] = "standard"
+    max_concurrent_trades: Optional[int] = 1
+    scan_time: Optional[str] = "10:00:00"
+    min_kelly_fraction: Optional[float] = 0.0
+    hard_stop_loss: Optional[float] = 2.0
+    lookback_days: Optional[int] = None  # None = use all data; otherwise limit to last N calendar days
+
+
+@router.post("/ml/backtest")
+def api_backtest(req: BacktestRequestSchema):
+    try:
+        from sklearn.preprocessing import StandardScaler, OneHotEncoder
+        from sklearn.compose import ColumnTransformer
+        from sklearn.pipeline import Pipeline
+        from sklearn.impute import SimpleImputer
+        import lightgbm as lgb
+    except ImportError:
+        raise HTTPException(status_code=500, detail="sklearn package is not installed in Python environment. Run 'pip install scikit-learn' first.")
+
+    # Guard rail
+    if req.mode == "direct_dev" and not req.confirm_direct_dev:
+        raise HTTPException(
+            status_code=400,
+            detail="direct_dev mode requires explicit confirm_direct_dev=true — results are in-sample and not valid for strategy validation"
+        )
+
+    # Fetch settings/thresholds
+    settings = _get_settings()
+    profit_threshold = float(settings.get("profit_threshold", "0.03"))
+    horizon_days = int(settings.get("horizon_days", "10"))
+
+    conn = sqlite3.connect(DB_PATH)
+    # Pull all is_synthetic=0 rows chronologically via get_real_trades
+    df_real = get_real_trades(conn, labeled=1)
+    conn.close()
+
+    # Apply lookback_days filter: restrict to trades within the last N calendar days
+    if req.lookback_days is not None and req.lookback_days > 0:
+        cutoff_date = (datetime.datetime.now() - datetime.timedelta(days=req.lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
+        df_real = df_real[df_real['timestamp'] >= cutoff_date].reset_index(drop=True)
+
+    N = len(df_real)
+
+    if req.mode == "walkforward":
+        # Initial T = walkforward_train_window
+        train_window = req.walkforward_train_window or 50
+        increment = req.walkforward_test_increment or 10
+
+        if N < train_window + increment:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Insufficient real trade volume for walk-forward. Required: at least {train_window + increment} labeled trades, but current count is {N}."
+            )
+
+        predictions = []
+        T = train_window
+        while T < N:
+            df_train = df_real.iloc[0:T]
+            test_end = min(T + increment, N)
+            df_test = df_real.iloc[T:test_end]
+
+            if len(df_test) == 0:
+                break
+
+            # Train multi-quantile LightGBM models on df_train
+            models = {}
+            # Advanced features for training
+            df_train_feat = compute_advanced_features(df_train)
+            numeric_features = [
+                'strike', 'volume', 'open_interest', 'vol_oi_ratio', 'implied_vol',
+                'underlier_price', 'premium', 'dte',
+                'moneyness', 'iv_hv_ratio', 'vix_level', 'log_premium'
+            ]
+            categorical_features = ['option_type', 'side', 'trend_alignment', 'dte_bucket']
+
+            X_train = df_train_feat[['ticker'] + numeric_features + categorical_features]
+            y_train = df_train_feat['observed_return']
+
+            numeric_transformer = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ])
+            categorical_transformer = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('onehot', OneHotEncoder(handle_unknown='ignore'))
+            ])
+            preprocessor = ColumnTransformer(
+                transformers=[
+                    ('num', numeric_transformer, numeric_features),
+                    ('cat', categorical_transformer, categorical_features)
+                ],
+                remainder='drop'
+            )
+
+            # Fit 5 quantiles
+            QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
+            for q in QUANTILES:
+                # Use a small min_child_samples for safety in walkforward training windows
+                pipe = Pipeline([
+                    ("preprocess", preprocessor),
+                    ("regressor", lgb.LGBMRegressor(
+                        objective="quantile",
+                        alpha=q,
+                        n_estimators=100,  # 100 estimators is faster and sufficient for walk-forward
+                        learning_rate=0.05,
+                        num_leaves=15,
+                        min_child_samples=5,
+                        random_state=42,
+                        verbose=-1
+                    ))
+                ])
+                pipe.fit(X_train, y_train)
+                models[q] = pipe
+
+            # Inference on df_test
+            df_test_feat = compute_advanced_features(df_test)
+            X_test = df_test_feat[['ticker'] + numeric_features + categorical_features]
+
+            p10_preds = models[0.1].predict(X_test)
+            p25_preds = models[0.25].predict(X_test)
+            p50_preds = models[0.5].predict(X_test)
+            p75_preds = models[0.75].predict(X_test)
+            p90_preds = models[0.9].predict(X_test)
+
+            for idx_test, (row_idx, row) in enumerate(df_test.iterrows()):
+                q_preds = {
+                    "p10": float(p10_preds[idx_test]),
+                    "p25": float(p25_preds[idx_test]),
+                    "p50": float(p50_preds[idx_test]),
+                    "p75": float(p75_preds[idx_test]),
+                    "p90": float(p90_preds[idx_test])
+                }
+                q_preds = enforce_monotonic_quantiles(q_preds)
+                p_success = compute_calibrated_p_success(
+                    profit_threshold,
+                    q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
+                )
+                predictions.append({
+                    "row": row,
+                    "quantiles": q_preds,
+                    "p_success": p_success
+                })
+
+            T += increment
+
+        in_sample_warning = False
+
+    elif req.mode == "direct_dev":
+        # Load from pkl
+        if not os.path.exists(MODEL_PATH):
+            raise HTTPException(
+                status_code=400,
+                detail="No trained model found. Please train a model in the ML Cockpit before running direct_dev backtest."
+            )
+
+        try:
+            models = joblib.load(MODEL_PATH)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
+
+        df_real_feat = compute_advanced_features(df_real)
+        numeric_features = [
+            'strike', 'volume', 'open_interest', 'vol_oi_ratio', 'implied_vol',
+            'underlier_price', 'premium', 'dte',
+            'moneyness', 'iv_hv_ratio', 'vix_level', 'log_premium'
+        ]
+        categorical_features = ['option_type', 'side', 'trend_alignment', 'dte_bucket']
+        X_real = df_real_feat[['ticker'] + numeric_features + categorical_features]
+
+        p10_preds = models[0.1].predict(X_real)
+        p25_preds = models[0.25].predict(X_real)
+        p50_preds = models[0.5].predict(X_real)
+        p75_preds = models[0.75].predict(X_real)
+        p90_preds = models[0.9].predict(X_real)
+
+        predictions = []
+        for idx, (row_idx, row) in enumerate(df_real.iterrows()):
+            q_preds = {
+                "p10": float(p10_preds[idx]),
+                "p25": float(p25_preds[idx]),
+                "p50": float(p50_preds[idx]),
+                "p75": float(p75_preds[idx]),
+                "p90": float(p90_preds[idx])
+            }
+            q_preds = enforce_monotonic_quantiles(q_preds)
+            p_success = compute_calibrated_p_success(
+                profit_threshold,
+                q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
+            )
+            predictions.append({
+                "row": row,
+                "quantiles": q_preds,
+                "p_success": p_success
+            })
+
+        in_sample_warning = True
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported mode: {req.mode}")
+
+    # Shared strategy execution logic
+    # Sizing and exit params
+    prob_threshold = req.prob_threshold or 0.65
+    kelly_multiplier = req.kelly_multiplier or 0.5
+    kelly_cap = req.kelly_cap or 0.25
+    stop_lambda = req.stop_lambda or 1.2
+    max_risk_pct_per_trade = req.max_risk_pct_per_trade or 0.02
+    strategy_type = req.strategy_type or "standard"
+    max_concurrent_trades = req.max_concurrent_trades if req.max_concurrent_trades is not None else 1
+    scan_time = req.scan_time or "10:00:00"
+    min_kelly_fraction = req.min_kelly_fraction or 0.0
+    hard_stop_loss = (req.hard_stop_loss or 0.0) / 100.0
+
+    # Date parsing
+    for p in predictions:
+        row = p["row"]
+        p["trade_date"] = datetime.datetime.strptime(row['timestamp'], "%Y-%m-%d %H:%M:%S").date()
+        if row.get('evaluation_date'):
+            p["exit_date"] = datetime.datetime.strptime(row['evaluation_date'], "%Y-%m-%d").date()
+        else:
+            p["exit_date"] = p["trade_date"] + datetime.timedelta(days=horizon_days)
+
+    if not predictions:
+        start_date = datetime.date.today()
+        end_date = datetime.date.today()
+    else:
+        start_date = min(p["trade_date"] for p in predictions)
+        end_date = max(p["exit_date"] for p in predictions)
+
+    current_equity = req.initial_capital or 100000.0
+    active_trades = []
+    transactions = []
+    daily_equity = []
+
+    # Map dates to predictions that start on that date
+    from collections import defaultdict
+    entries_by_date = defaultdict(list)
+    for p in predictions:
+        entries_by_date[p["trade_date"]].append(p)
+
+    current_date = start_date
+    while current_date <= end_date:
+        # Determine number of slots active before today's exits are processed
+        occupied_slots = len(active_trades)
+
+        # 1. Process exits
+        active_remaining = []
+        for trade in active_trades:
+            if trade["exit_date"] <= current_date:
+                current_equity += trade["pnl_usd"]
+            else:
+                active_remaining.append(trade)
+        active_trades = active_remaining
+
+        # 2. Process entries
+        todays_candidates = entries_by_date[current_date]
+        
+        if strategy_type == "highest_prob_scan":
+            if occupied_slots < max_concurrent_trades:
+                # Parse limit time
+                try:
+                    sh, sm, ss = map(int, scan_time.split(":"))
+                    limit_time = datetime.time(sh, sm, ss)
+                except Exception:
+                    limit_time = datetime.time(10, 0, 0)
+                
+                # Filter candidates to <= limit_time and p_success >= prob_threshold
+                scan_candidates = []
+                for p in todays_candidates:
+                    row = p["row"]
+                    try:
+                        dt = datetime.datetime.strptime(row['timestamp'], "%Y-%m-%d %H:%M:%S")
+                        t_time = dt.time()
+                    except Exception:
+                        t_time = datetime.time(12, 0, 0)
+                    
+                    if t_time <= limit_time and p["p_success"] >= prob_threshold:
+                        scan_candidates.append(p)
+                
+                # Execute the one with highest p_success
+                if scan_candidates:
+                    best_candidate = max(scan_candidates, key=lambda x: x["p_success"])
+                    
+                    p = best_candidate
+                    row = p["row"]
+                    p_success = p["p_success"]
+                    q_preds = p["quantiles"]
+                    
+                    p10_pred = q_preds["p10"]
+                    p50_pred = q_preds["p50"]
+                    p90_pred = q_preds["p90"]
+
+                    kelly_fraction_raw, _ = kelly_fraction(p_success, p50_pred, p10_pred, p90_pred)
+                    kelly_fraction_final = min(kelly_fraction_raw * kelly_multiplier, kelly_cap)
+
+                    underlier_entry = float(row['underlier_price'])
+                    if hard_stop_loss > 0.0:
+                        risk_per_unit = hard_stop_loss
+                        stop_price = underlier_entry * (1.0 - risk_per_unit)
+                    else:
+                        stop_price = underlier_entry * (1.0 + p10_pred * stop_lambda)
+                        risk_per_unit = abs(underlier_entry - stop_price) / underlier_entry
+
+                    if risk_per_unit > 0:
+                        if kelly_fraction_final * risk_per_unit > max_risk_pct_per_trade:
+                            kelly_fraction_final = max_risk_pct_per_trade / risk_per_unit
+
+                    if kelly_fraction_final < min_kelly_fraction:
+                        continue
+
+                    position_size_usd = current_equity * kelly_fraction_final
+
+                    if position_size_usd >= 0.01:
+                        max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
+                        observed_return = float(row['observed_return']) if row['observed_return'] is not None else 0.0
+
+                        if max_adverse_return <= -risk_per_unit:
+                            exit_reason = "stop_hit"
+                            trade_return = -risk_per_unit
+                        elif observed_return >= profit_threshold:
+                            exit_reason = "profit_hit"
+                            trade_return = profit_threshold
+                        else:
+                            exit_reason = "expired"
+                            trade_return = observed_return
+
+                        pnl_usd = position_size_usd * trade_return
+
+                        active_trades.append({
+                            "exit_date": p["exit_date"],
+                            "pnl_usd": pnl_usd
+                        })
+
+                        contract_str = f"{row['ticker']} {row['expiration']} {row['option_type'][0].upper()}{row['strike']}"
+                        transactions.append({
+                            "ticker": row['ticker'],
+                            "trade_date": p["trade_date"].strftime("%Y-%m-%d"),
+                            "contract": contract_str,
+                            "p_success": round(p_success, 4),
+                            "kelly_fraction": round(kelly_fraction_final, 4),
+                            "position_size_usd": round(position_size_usd, 2),
+                            "stop_price": round(stop_price, 2),
+                            "exit_reason": exit_reason,
+                            "observed_return": round(trade_return, 4),
+                            "pnl_usd": round(pnl_usd, 2)
+                        })
+        else:
+            for p in todays_candidates:
+                row = p["row"]
+                p_success = p["p_success"]
+                q_preds = p["quantiles"]
+
+                if p_success >= prob_threshold:
+                    p10_pred = q_preds["p10"]
+                    p50_pred = q_preds["p50"]
+                    p90_pred = q_preds["p90"]
+
+                    kelly_fraction_raw, _ = kelly_fraction(p_success, p50_pred, p10_pred, p90_pred)
+                    kelly_fraction_final = min(kelly_fraction_raw * kelly_multiplier, kelly_cap)
+
+                    underlier_entry = float(row['underlier_price'])
+                    if hard_stop_loss > 0.0:
+                        risk_per_unit = hard_stop_loss
+                        stop_price = underlier_entry * (1.0 - risk_per_unit)
+                    else:
+                        stop_price = underlier_entry * (1.0 + p10_pred * stop_lambda)
+                        risk_per_unit = abs(underlier_entry - stop_price) / underlier_entry
+
+                    if risk_per_unit > 0:
+                        if kelly_fraction_final * risk_per_unit > max_risk_pct_per_trade:
+                            kelly_fraction_final = max_risk_pct_per_trade / risk_per_unit
+
+                    if kelly_fraction_final < min_kelly_fraction:
+                        continue
+
+                    position_size_usd = current_equity * kelly_fraction_final
+
+                    if position_size_usd < 0.01:
+                        continue
+
+                    max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
+                    observed_return = float(row['observed_return']) if row['observed_return'] is not None else 0.0
+
+                    if max_adverse_return <= -risk_per_unit:
+                        exit_reason = "stop_hit"
+                        trade_return = -risk_per_unit
+                    elif observed_return >= profit_threshold:
+                        exit_reason = "profit_hit"
+                        trade_return = profit_threshold
+                    else:
+                        exit_reason = "expired"
+                        trade_return = observed_return
+
+                    pnl_usd = position_size_usd * trade_return
+
+                    active_trades.append({
+                        "exit_date": p["exit_date"],
+                        "pnl_usd": pnl_usd
+                    })
+
+                    contract_str = f"{row['ticker']} {row['expiration']} {row['option_type'][0].upper()}{row['strike']}"
+                    transactions.append({
+                        "ticker": row['ticker'],
+                        "trade_date": p["trade_date"].strftime("%Y-%m-%d"),
+                        "contract": contract_str,
+                        "p_success": round(p_success, 4),
+                        "kelly_fraction": round(kelly_fraction_final, 4),
+                        "position_size_usd": round(position_size_usd, 2),
+                        "stop_price": round(stop_price, 2),
+                        "exit_reason": exit_reason,
+                        "observed_return": round(trade_return, 4),
+                        "pnl_usd": round(pnl_usd, 2)
+                    })
+
+        # 3. Record daily equity
+        daily_equity.append({
+            "date": current_date.strftime("%Y-%m-%d"),
+            "equity": round(current_equity, 2)
+        })
+
+        current_date += datetime.timedelta(days=1)
+
+    # ── Sharpe/Sortino: compute on TRADE-DAY returns only ─────────
+    # Using all calendar days (including flat/non-trade days) dilutes
+    # volatility with hundreds of 0.0 returns, inflating Sharpe by 3-5x.
+    # Instead, we compute returns only on days where equity actually changed.
+    equity_values = [pt["equity"] for pt in daily_equity]
+
+    # Build trade-day returns: only include days where equity changed
+    trade_day_returns = []
+    for idx in range(1, len(equity_values)):
+        prev = equity_values[idx - 1]
+        curr = equity_values[idx]
+        if prev > 0 and curr != prev:  # Skip flat days
+            trade_day_returns.append((curr - prev) / prev)
+
+    # Count total trade days (days with actual equity movement) for annualization
+    n_trade_days = len(trade_day_returns)
+
+    if n_trade_days > 1:
+        mean_return = float(np.mean(trade_day_returns))
+        std_return = float(np.std(trade_day_returns, ddof=1))
+        # Annualize using the actual trading frequency, not a fixed 252
+        total_calendar_days = max(len(equity_values) - 1, 1)
+        trades_per_year = (n_trade_days / total_calendar_days) * 365.0
+        annualization_factor = np.sqrt(trades_per_year)
+        sharpe = (mean_return / std_return) * annualization_factor if std_return > 0 else 0.0
+
+        neg_returns = [r for r in trade_day_returns if r < 0]
+        if neg_returns:
+            downside_std = float(np.sqrt(np.mean([r**2 for r in neg_returns])))
+            sortino = (mean_return / downside_std) * annualization_factor if downside_std > 0 else 0.0
+        else:
+            sortino = 0.0
+    else:
+        mean_return = 0.0
+        sharpe = 0.0
+        sortino = 0.0
+
+    # Summary stats
+    wins = [t['pnl_usd'] for t in transactions if t['pnl_usd'] > 0]
+    losses = [abs(t['pnl_usd']) for t in transactions if t['pnl_usd'] < 0]
+    avg_win = np.mean(wins) if wins else 0.0
+    avg_loss = np.mean(losses) if losses else 0.0
+    win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0.0
+
+    sum_wins = sum(wins)
+    sum_losses = sum(losses)
+    profit_factor = sum_wins / sum_losses if sum_losses > 0 else 0.0
+
+    win_rate = len(wins) / len(transactions) * 100.0 if transactions else 0.0
+
+    # Max drawdown
+    max_drawdown = 0.0
+    peak = req.initial_capital or 100000.0
+    for eq in equity_values:
+        if eq > peak:
+            peak = eq
+        dd = (peak - eq) / peak * 100 if peak > 0 else 0.0
+        if dd > max_drawdown:
+            max_drawdown = dd
+
+    initial_cap = req.initial_capital or 100000.0
+    cum_pnl_pct = ((current_equity - initial_cap) / initial_cap) * 100.0
+    cumulative_pnl_usd = current_equity - initial_cap
+    
+    total_cal_days = max(len(daily_equity) - 1, 1)
+    if current_equity > 0 and initial_cap > 0 and total_cal_days > 0:
+        cagr = ((current_equity / initial_cap) ** (365.0 / total_cal_days) - 1) * 100.0
+    else:
+        cagr = 0.0
+
+    # Build bias/methodology warnings
+    warnings = []
+    if in_sample_warning:
+        warnings.append("in-sample: indicative only, not valid for strategy validation")
+    warnings.append("settlement-based: Sharpe/Sortino computed on settlement-day returns only — intra-trade mark-to-market risk is not captured")
+    warnings.append("vix_hv_lookforward: VIX and HV features use current market values applied to all historical rows — mild look-ahead bias")
+
+    summary = {
+        "cumulative_pnl_usd": round(float(cumulative_pnl_usd), 2),
+        "cumulative_pnl_pct": round(float(cum_pnl_pct), 4),
+        "cagr_pct": round(float(cagr), 4),
+        "sharpe": round(float(sharpe), 4),
+        "sortino": round(float(sortino), 4),
+        "win_loss_ratio": round(float(win_loss_ratio), 4),
+        "profit_factor": round(float(profit_factor), 4),
+        "max_drawdown_pct": round(float(max_drawdown), 4),
+        "win_rate_pct": round(float(win_rate), 2),
+        "trades_triggered": int(len(transactions)),
+        "trades_total_available": int(len(predictions)),
+        "trade_days_used_for_sharpe": n_trade_days
+    }
+
+    return {
+        "mode": req.mode,
+        "in_sample_warning": in_sample_warning,
+        "warning_message": "in-sample, indicative only" if in_sample_warning else "",
+        "equity_curve": daily_equity,
+        "transactions": transactions,
+        "summary": summary,
+        "warnings": warnings,
+        "path_resolution_note": "stop vs profit ordering inferred conservatively from summary MAE/return, not full price path"
+    }

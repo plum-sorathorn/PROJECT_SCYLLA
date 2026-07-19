@@ -19,14 +19,25 @@ const state = {
   selectedRows: new Set(),
   charts: {},
 
-  // ML Cockpit State
+  // ML Cockpit State (now lives in Backtest page)
   mlStats: {},
   mlTrades: [],
   mlImportance: [],
   mlModelMetrics: {},
   mlModelRuns: [],
   mlSettings: {},
-  mlLoaded: false
+  mlLoaded: false,
+
+  // Dashboard State
+  dashboardOpenTrades: [],
+  dashboardLoaded: false,
+
+  // Backtester State
+  backtestResults: null,
+  backtestSweepResults: null,
+  backtestSortKey: 'trade_date',
+  backtestSortDir: -1,
+  directDevConfirmed: false
 };
 
 // ── Utility ─────────────────────────────────────────────────
@@ -44,40 +55,41 @@ const $ = (id) => document.getElementById(id);
 function showView(viewName) {
   const titleEl = $('header-title-text');
   const subEl = $('header-sub-text');
-  const mlCockpitBtn = $('btn-ml-cockpit');
-  const consoleBtn = $('btn-console');
   const tacticalStrip = $('tactical-summary-strip');
-  const mlStrip = $('ml-summary-strip');
   const tacticalView = $('view-tactical');
-  const mlView = $('view-ml');
+  const dashboardView = $('view-dashboard');
+  const backtestView = $('view-backtest');
 
-  if (viewName === 'ml') {
-    tacticalView.style.display = 'none';
-    tacticalStrip.style.display = 'none';
-    mlCockpitBtn.style.display = 'none';
+  // Hide all views first
+  if (tacticalView) tacticalView.style.display = 'none';
+  if (tacticalStrip) tacticalStrip.style.display = 'none';
+  if (dashboardView) dashboardView.style.display = 'none';
+  if (backtestView) backtestView.style.display = 'none';
 
-    mlView.style.display = 'block';
-    mlStrip.style.display = 'block';
-    consoleBtn.style.display = 'inline-flex';
+  if (viewName === 'dashboard') {
+    if (dashboardView) dashboardView.style.display = 'block';
 
-    titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">ML Cockpit</span>';
-    subEl.textContent = 'SELF-TRAINING PREDICTOR — CLASSIFICATION & TELEMETRY SYSTEMS';
+    titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Dashboard</span>';
+    subEl.textContent = 'OPEN POSITIONS & TRADE MONITORING — REAL-TIME PROBABILITY ANALYSIS';
 
+    if (!state.dashboardLoaded) {
+      refreshDashboard();
+      state.dashboardLoaded = true;
+    }
+  } else if (viewName === 'backtest') {
+    if (backtestView) backtestView.style.display = 'block';
+
+    titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Backtester</span>';
+    subEl.textContent = 'STRATEGY EVALUATION & WALKFOWARD PERFORMANCE SIMULATOR';
+
+    // Load ML ops data into backtest page if not already loaded
     if (!state.mlLoaded) {
       refreshML();
       state.mlLoaded = true;
-    } else {
-      // Re-trigger chart rendering on visible canvas
-      renderModelRunsChart();
     }
   } else {
-    mlView.style.display = 'none';
-    mlStrip.style.display = 'none';
-    consoleBtn.style.display = 'none';
-
-    tacticalView.style.display = 'block';
-    tacticalStrip.style.display = 'block';
-    mlCockpitBtn.style.display = 'inline-flex';
+    if (tacticalView) tacticalView.style.display = 'block';
+    if (tacticalStrip) tacticalStrip.style.display = 'block';
 
     titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Tactical Console</span>';
     subEl.textContent = 'VOLATILITY & FLOW TELEMETRY — POWERED BY C++ CORE & OpenBB ODP';
@@ -87,12 +99,21 @@ function showView(viewName) {
     renderVolConChart();
     renderIVSmileChart();
   }
+
+  // Update active state in sidebar nav
+  document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+  const activeNavItem = $(`nav-${viewName}`);
+  if (activeNavItem) {
+    activeNavItem.classList.add('active');
+  }
 }
 
 function handleRouting() {
   const hash = window.location.hash;
-  if (hash === '#ml') {
-    showView('ml');
+  if (hash === '#dashboard') {
+    showView('dashboard');
+  } else if (hash === '#backtest') {
+    showView('backtest');
   } else {
     showView('tactical');
   }
@@ -132,61 +153,9 @@ function blackScholes(type, S, K, T_days, sigma_pct, r = 0.045) {
   }
 }
 
-function recalculateTheoreticalPremium() {
-  if (!$('inf-autocalc').checked) return;
-
-  const S = parseFloat($('inf-underlier').value) || 0;
-  const K = parseFloat($('inf-strike').value) || 0;
-  const type = $('inf-type').value;
-  const dte = parseFloat($('inf-dte').value) || 0;
-  const iv = parseFloat($('inf-iv').value) || 0;
-  const vol = parseFloat($('inf-volume').value) || 0;
-
-  if (S <= 0 || K <= 0 || dte <= 0 || iv <= 0 || vol <= 0) {
-    return;
-  }
-
-  const pricePerShare = blackScholes(type, S, K, dte, iv);
-  const totalPremium = pricePerShare * vol * 100;
-  $('inf-premium').value = totalPremium.toFixed(2);
-}
-
-// ── ML Inference Form Target Profile Sync ────────────────────
 function loadTradeIntoPredictor(trade, source) {
   const ticker = (trade.ticker || '').toUpperCase();
   state.activeTicker = ticker;
-  const strike = trade.strike ?? 0;
-  const optionType = trade.optionType || trade.option_type || 'Call';
-  const side = trade.side || 'BUY';
-  const dte = trade.dte ?? 30;
-  const volOiRatio = trade.volOiRatio ?? trade.vol_oi_ratio ?? 1.0;
-  const impliedVol = trade.impliedVolatility ?? trade.implied_vol ?? 30.0;
-  const premium = trade.premium ?? 0;
-  const trendAlignment = trade.trendAlignment ?? trade.trend_alignment ?? 'NEUTRAL';
-  const underlierPrice = trade.underlierPrice ?? trade.underlier_price ?? 0;
-  const volume = trade.volume ?? 1000;
-
-  // Uncheck autocalc when loading recorded trade values
-  $('inf-autocalc').checked = false;
-
-  $('inf-underlier').value = underlierPrice;
-  $('inf-strike').value = strike;
-  $('inf-type').value = optionType;
-  $('inf-side').value = side;
-  $('inf-dte').value = dte;
-  $('inf-ratio').value = volOiRatio;
-  $('inf-iv').value = impliedVol;
-  $('inf-volume').value = volume;
-  $('inf-premium').value = premium;
-  $('inf-trend').value = trendAlignment;
-
-  const profileEl = $('prediction-target-profile');
-  if (profileEl) {
-    profileEl.textContent = `TARGET PROFILE: ${ticker} $${fmt(strike)} ${optionType.toUpperCase()} (${dte} DTE) [SOURCE: ${source}]`;
-  }
-
-  // Trigger inference automatically
-  runManualInference({ preventDefault: () => {} });
 }
 
 // ── Clock ───────────────────────────────────────────────────
@@ -451,7 +420,7 @@ function renderPCRChart() {
   const ctx = $('chart-pcr');
   if (!ctx) return;
 
-  const colors = { SPY: '#E2E2E2', QQQ: '#D4AF37', IWM: '#BF5A5A' };
+  const colors = { SPY: '#005566', QQQ: '#2d7a4a', IWM: '#8b3a3a' };
   const tickers = ['SPY', 'QQQ', 'IWM'];
 
   const allLabels = [];
@@ -524,17 +493,17 @@ function renderVolConChart() {
         {
           label: 'Call Volume',
           data: callVols,
-          backgroundColor: '#E2E2E225',
-          borderColor: '#E2E2E2',
-          borderWidth: 1,
+          backgroundColor: '#e8f5e9',
+          borderColor: '#2d7a4a',
+          borderWidth: 0.5,
           stack: 'vol',
         },
         {
           label: 'Put Volume',
           data: putVols,
-          backgroundColor: '#BF5A5A25',
-          borderColor: '#BF5A5A',
-          borderWidth: 1,
+          backgroundColor: '#ffebee',
+          borderColor: '#8b3a3a',
+          borderWidth: 0.5,
           stack: 'vol',
         },
       ],
@@ -580,7 +549,7 @@ function renderIVSmileChart() {
 
   const smile = state.ivData.smileData || [];
   const expirations = [...new Set(smile.map(p => p.expiration))].slice(0, 2);
-  const colors = ['#E2E2E2', '#D4AF37'];
+  const colors = ['#005566', '#2d7a4a'];
 
   const datasets = expirations.map((exp, i) => {
     const pts = smile
@@ -728,38 +697,38 @@ function chartDefaults({ title = '', xLabel = '', yLabel = '', stacked = false }
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: '#121316',
-        borderColor: '#222428',
-        borderWidth: 1,
-        titleColor: '#D4AF37',
-        bodyColor: '#E2E2E2',
-        titleFont: { family: 'Share Tech Mono', size: 11 },
-        bodyFont: { family: 'Share Tech Mono', size: 11 },
+        backgroundColor: '#ffffff',
+        borderColor: '#e0e0e0',
+        borderWidth: 0.5,
+        titleColor: '#005566',
+        bodyColor: '#1a1a1a',
+        titleFont: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 11, weight: 'bold' },
+        bodyFont: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 11 },
         padding: 10,
       },
     },
     scales: {
       x: {
         stacked,
-        grid: { color: '#22242833', drawBorder: false },
+        grid: { color: '#f0f0f0', drawBorder: false },
         ticks: {
-          color: '#7B7D82',
-          font: { family: 'Share Tech Mono', size: 9 },
+          color: '#666666',
+          font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 },
           maxTicksLimit: 8,
           maxRotation: 45,
         },
-        border: { color: '#222428' },
-        ...(xLabel ? { title: { display: true, text: xLabel, color: '#7B7D82', font: { family: 'Share Tech Mono', size: 9 } } } : {}),
+        border: { color: '#e0e0e0' },
+        ...(xLabel ? { title: { display: true, text: xLabel, color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } } } : {}),
       },
       y: {
         stacked,
-        grid: { color: '#22242844', drawBorder: false },
+        grid: { color: '#f0f0f0', drawBorder: false },
         ticks: {
-          color: '#7B7D82',
-          font: { family: 'Share Tech Mono', size: 9 },
+          color: '#666666',
+          font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 },
         },
-        border: { color: '#222428' },
-        ...(yLabel ? { title: { display: true, text: yLabel, color: '#7B7D82', font: { family: 'Share Tech Mono', size: 9 } } } : {}),
+        border: { color: '#e0e0e0' },
+        ...(yLabel ? { title: { display: true, text: yLabel, color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } } } : {}),
       },
     },
   };
@@ -787,17 +756,24 @@ async function fetchStats() {
     const data = await r.json();
     state.mlStats = data;
     
-    $('sum-total-trades').textContent = data.total_trades ?? 0;
-    $('sum-labeled-trades').textContent = data.labeled_trades ?? 0;
-    $('sum-win-rate').textContent = fmtPct(data.success_ratio);
+    const totalTradesEl = $('dash-total-trades');
+    if (totalTradesEl) totalTradesEl.textContent = data.total_trades ?? 0;
     
-    const statusEl = $('sum-model-status');
-    if (data.model_ready) {
-      statusEl.textContent = 'MODEL READY';
-      statusEl.className = 'tile-value accent-call';
-    } else {
-      statusEl.textContent = 'NO WEIGHTS';
-      statusEl.className = 'tile-value accent-coral';
+    const labeledTradesEl = $('dash-labeled-trades');
+    if (labeledTradesEl) labeledTradesEl.textContent = data.labeled_trades ?? 0;
+    
+    const winRateEl = $('dash-win-rate');
+    if (winRateEl) winRateEl.textContent = fmtPct(data.success_ratio);
+    
+    const statusEl = $('dash-model-status');
+    if (statusEl) {
+      if (data.model_ready) {
+        statusEl.textContent = 'MODEL READY';
+        statusEl.className = 'tile-value accent-call';
+      } else {
+        statusEl.textContent = 'NO WEIGHTS';
+        statusEl.className = 'tile-value accent-coral';
+      }
     }
   } catch (e) {
     console.error('Error fetching stats:', e);
@@ -988,159 +964,7 @@ function renderFeatureImportances(list) {
   wrapper.innerHTML = rows.join('');
 }
 
-// Helper to map returns to a percentage for the horizontal range bar [-30%, +30%]
-function mapReturnToPercent(ret) {
-  const minRet = -0.30;
-  const maxRet = 0.30;
-  const pct = ((ret - minRet) / (maxRet - minRet)) * 100;
-  return Math.min(100, Math.max(0, pct));
-}
-
-// ── Run Manual Prediction / Inference ────────────────────────
-async function runManualInference(e) {
-  e.preventDefault();
-  
-  const data = {
-    ticker: state.activeTicker || 'SPY',
-    underlierPrice: parseFloat($('inf-underlier').value),
-    strike: parseFloat($('inf-strike').value),
-    optionType: $('inf-type').value,
-    side: $('inf-side').value,
-    dte: parseInt($('inf-dte').value),
-    volOiRatio: parseFloat($('inf-ratio').value),
-    impliedVolatility: parseFloat($('inf-iv').value),
-    premium: parseFloat($('inf-premium').value),
-    trendAlignment: $('inf-trend').value,
-    volume: 1000,          // standard placeholders
-    openInterest: 200      // standard placeholders
-  };
-  
-  try {
-    const r = await fetch(`${API_BASE}/api/ml/predict`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    });
-    
-    const res = await r.json();
-    
-    // 1. Success Probability
-    const pSuccess = res.p_success;
-    const pctStr = (pSuccess * 100).toFixed(1) + '%';
-    const pctEl = $('prediction-percentage');
-    pctEl.textContent = pctStr;
-    
-    if (pSuccess >= 0.70) {
-      pctEl.style.color = '#8FA382'; // Bull green/sage glow
-      pctEl.style.textShadow = '0 0 6px rgba(143, 163, 130, 0.4)';
-    } else if (pSuccess <= 0.40) {
-      pctEl.style.color = 'var(--put)'; // Bear coral red glow
-      pctEl.style.textShadow = '0 0 6px rgba(191, 90, 90, 0.4)';
-    } else {
-      pctEl.style.color = 'var(--accent)'; // Standard gold glow
-      pctEl.style.textShadow = '0 0 6px rgba(212, 175, 55, 0.4)';
-    }
-    
-    // 2. Model Engine Badge
-    const modelType = res.model_type || 'quantile_regression';
-    $('model-type-badge').textContent = modelType.toUpperCase().replace('_', ' ');
-    
-    // 3. Recommended Strategy
-    const strat = res.strategy;
-    const conf = res.strategy_confidence;
-    const stratEl = $('strategy-badge');
-    stratEl.textContent = `${strat.replace('_', ' ')} — ${conf}%`;
-    
-    let stratBg = 'rgba(255, 255, 255, 0.05)';
-    let stratBorder = 'var(--border)';
-    let stratColor = 'var(--text-muted)';
-    
-    if (strat === 'VOL_EXPANSION') {
-      stratBg = 'rgba(217, 70, 239, 0.15)';
-      stratBorder = '#d946ef';
-      stratColor = '#f5d0fe';
-    } else if (strat === 'SIDEWAYS') {
-      stratBg = 'rgba(6, 182, 212, 0.15)';
-      stratBorder = '#06b6d4';
-      stratColor = '#cffafe';
-    } else if (strat === 'BULLISH_BREAKOUT') {
-      stratBg = 'rgba(16, 185, 129, 0.15)';
-      stratBorder = '#10b981';
-      stratColor = '#d1fae5';
-    } else if (strat === 'BEARISH_BREAKDOWN') {
-      stratBg = 'rgba(244, 63, 94, 0.15)';
-      stratBorder = '#f43f5e';
-      stratColor = '#ffe4e6';
-    }
-    
-    stratEl.style.background = stratBg;
-    stratEl.style.borderColor = stratBorder;
-    stratEl.style.color = stratColor;
-    stratEl.style.boxShadow = `0 0 6px ${stratBorder}40`;
-    
-    // 4. Kelly Position Sizing
-    const cappedK = res.kelly_fraction;
-    const uncappedK = res.kelly_fraction_uncapped;
-    const cappedEl = $('kelly-capped-percentage');
-    cappedEl.textContent = (cappedK * 100).toFixed(1) + '%';
-    
-    const uncappedEl = $('kelly-uncapped-subtext');
-    uncappedEl.textContent = `Uncapped: ${(uncappedK * 100).toFixed(1)}%`;
-    uncappedEl.title = `Model suggested uncapped sizing: ${(uncappedK * 100).toFixed(1)}%`;
-    
-    // 5. Quantile Range Bar
-    const p10 = res.quantiles.p10;
-    const p50 = res.quantiles.p50;
-    const p90 = res.quantiles.p90;
-    
-    $('val-p10').textContent = (p10 * 100).toFixed(1) + '%';
-    $('val-p50').textContent = (p50 * 100).toFixed(1) + '%';
-    $('val-p90').textContent = (p90 * 100).toFixed(1) + '%';
-    
-    const p10Pct = mapReturnToPercent(p10);
-    const p50Pct = mapReturnToPercent(p50);
-    const p90Pct = mapReturnToPercent(p90);
-    
-    const fillEl = $('quantile-fill-bar');
-    fillEl.style.left = p10Pct + '%';
-    fillEl.style.width = Math.max(0, p90Pct - p10Pct) + '%';
-    
-    const tickEl = $('quantile-median-tick');
-    tickEl.style.left = p50Pct + '%';
-    
-    // 6. Surface the small badge inline in the active row of Unusual Activity Registry (scanner table)
-    const activeRow = document.querySelector('#scanner-table tr.active-row');
-    if (activeRow) {
-      const tickerCell = activeRow.cells[0];
-      if (tickerCell) {
-        const oldBadge = tickerCell.querySelector('.inline-strategy-badge');
-        if (oldBadge) {
-          oldBadge.remove();
-        }
-        
-        const badgeSpan = document.createElement('span');
-        badgeSpan.className = 'inline-strategy-badge';
-        badgeSpan.textContent = strat.replace('_', ' ');
-        badgeSpan.style.display = 'block';
-        badgeSpan.style.marginTop = '4px';
-        badgeSpan.style.padding = '2px 6px';
-        badgeSpan.style.borderRadius = '3px';
-        badgeSpan.style.fontSize = '9px';
-        badgeSpan.style.fontWeight = 'bold';
-        badgeSpan.style.fontFamily = 'var(--font-mono)';
-        badgeSpan.style.textAlign = 'center';
-        badgeSpan.style.width = 'max-content';
-        badgeSpan.style.border = '1px solid ' + stratBorder;
-        badgeSpan.style.background = stratBg;
-        badgeSpan.style.color = stratColor;
-        tickerCell.appendChild(badgeSpan);
-      }
-    }
-    
-  } catch (e) {
-    alert(`Prediction inference call failed: ${e.message}`);
-  }
-}
+// Obsolete manual inference logic removed.
 
 // ── Fetch settings ───────────────────────────────────────────
 async function fetchSettings() {
@@ -1296,7 +1120,7 @@ function renderModelRunsChart() {
         {
           label: 'Test ROC AUC (RHS)',
           data: rocData,
-          borderColor: 'rgba(212, 175, 55, 0.9)', // Gold
+          borderColor: 'rgba(0, 85, 102, 0.9)', // Teal
           backgroundColor: 'transparent',
           borderDash: [5, 5],
           tension: 0.1,
@@ -1309,23 +1133,23 @@ function renderModelRunsChart() {
       maintainAspectRatio: false,
       plugins: {
         legend: {
-          labels: { color: 'rgba(255, 255, 255, 0.7)', font: { family: 'Share Tech Mono', size: 9 } }
+          labels: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } }
         }
       },
       scales: {
         x: {
-          grid: { color: 'rgba(255,255,255,0.05)' },
-          ticks: { color: 'rgba(255,255,255,0.4)', font: { family: 'Share Tech Mono' } }
+          grid: { color: '#f0f0f0' },
+          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
         },
         y: {
           position: 'left',
-          grid: { color: 'rgba(255,255,255,0.05)' },
-          ticks: { color: 'rgba(255,255,255,0.4)', font: { family: 'Share Tech Mono' } },
+          grid: { color: '#f0f0f0' },
+          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } },
           title: {
             display: true,
             text: 'Pinball Loss',
-            color: 'rgba(255,255,255,0.5)',
-            font: { family: 'Share Tech Mono', size: 10 }
+            color: '#666666',
+            font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 }
           }
         },
         y1: {
@@ -1333,12 +1157,12 @@ function renderModelRunsChart() {
           grid: { drawOnChartArea: false },
           min: 0,
           max: 1.0,
-          ticks: { color: 'rgba(212, 175, 55, 0.6)', font: { family: 'Share Tech Mono' } },
+          ticks: { color: 'rgba(0, 85, 102, 0.7)', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } },
           title: {
             display: true,
             text: 'ROC AUC',
-            color: 'rgba(212, 175, 55, 0.6)',
-            font: { family: 'Share Tech Mono', size: 10 }
+            color: 'rgba(0, 85, 102, 0.7)',
+            font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 }
           }
         }
       }
@@ -1348,11 +1172,151 @@ function renderModelRunsChart() {
 
 async function refreshML() {
   await Promise.all([
-    fetchStats(),
-    fetchTrades(),
     fetchSettings(),
     fetchModelRuns()
   ]);
+}
+
+// ── Dashboard: Fetch and render open trades ──────────────────
+async function refreshDashboard() {
+  await Promise.all([
+    fetchOpenTrades(),
+    fetchStats()
+  ]);
+}
+
+async function fetchOpenTrades() {
+  setLoading('dashboard-loading', true);
+  try {
+    const r = await fetch(`${API_BASE}/api/ml/open-trades`);
+    const json = await r.json();
+    state.dashboardOpenTrades = json.data || [];
+
+    // Update summary tiles
+    const openCount = $('dash-open-count');
+    if (openCount) openCount.textContent = json.count || 0;
+
+    // Compute avg p_success from trades that have it
+    const tradesWithP = state.dashboardOpenTrades.filter(t => t.p_success != null);
+    const avgProb = $('dash-avg-prob');
+    if (avgProb && tradesWithP.length > 0) {
+      const avg = tradesWithP.reduce((s, t) => s + t.p_success, 0) / tradesWithP.length;
+      avgProb.textContent = (avg * 100).toFixed(1) + '%';
+    } else if (avgProb) {
+      avgProb.textContent = '--';
+    }
+
+    // Render highest probability hero card
+    const topTrade = json.highest_probability;
+    const topCard = $('card-top-trade');
+    if (topTrade && topCard) {
+      topCard.style.display = 'block';
+      $('top-trade-ticker').textContent = topTrade.ticker || '--';
+      $('top-trade-prob').textContent = topTrade.p_success != null ? (topTrade.p_success * 100).toFixed(1) + '%' : '--';
+      const contract = `${topTrade.ticker} ${topTrade.expiration} ${(topTrade.option_type || '')[0]?.toUpperCase() || ''}${topTrade.strike}`;
+      $('top-trade-contract').textContent = contract;
+      $('top-trade-kelly').textContent = topTrade.kelly_capped != null ? (topTrade.kelly_capped * 100).toFixed(1) + '%' : '--';
+      $('top-trade-strategy').textContent = (topTrade.predicted_strategy || '--').replace(/_/g, ' ');
+      $('top-trade-date').textContent = topTrade.timestamp ? topTrade.timestamp.split(' ')[0] : '--';
+
+      // Color the probability
+      const probEl = $('top-trade-prob');
+      if (topTrade.p_success >= 0.70) {
+        probEl.style.color = '#8FA382';
+      } else if (topTrade.p_success <= 0.40) {
+        probEl.style.color = 'var(--put)';
+      } else {
+        probEl.style.color = 'var(--accent)';
+      }
+    } else if (topCard) {
+      topCard.style.display = 'none';
+    }
+
+    renderOpenTradesTable();
+  } catch (e) {
+    const tbody = $('open-trades-tbody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ ERROR: COULD NOT FETCH OPEN TRADES — ${e.message} ]</td></tr>`;
+    console.error('Open trades fetch error:', e);
+  } finally {
+    setLoading('dashboard-loading', false);
+  }
+}
+
+function renderOpenTradesTable() {
+  const tbody = $('open-trades-tbody');
+  if (!tbody) return;
+
+  let trades = [...state.dashboardOpenTrades];
+
+  // Filter by ticker
+  const tickerFilter = $('dash-filter-ticker')?.value?.trim().toUpperCase();
+  if (tickerFilter) {
+    trades = trades.filter(t => (t.ticker || '').toUpperCase().includes(tickerFilter));
+  }
+
+  // Filter by strategy
+  const strategyFilter = $('dash-filter-strategy')?.value || 'ALL';
+  if (strategyFilter !== 'ALL') {
+    trades = trades.filter(t => t.predicted_strategy === strategyFilter);
+  }
+
+  // Sort
+  const sortBy = $('dash-sort-by')?.value || 'timestamp_desc';
+  switch (sortBy) {
+    case 'timestamp_asc':
+      trades.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+      break;
+    case 'p_success_desc':
+      trades.sort((a, b) => (b.p_success || 0) - (a.p_success || 0));
+      break;
+    case 'kelly_desc':
+      trades.sort((a, b) => (b.kelly_capped || 0) - (a.kelly_capped || 0));
+      break;
+    case 'dte_asc':
+      trades.sort((a, b) => (a.dte || 999) - (b.dte || 999));
+      break;
+    default: // timestamp_desc
+      trades.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+      break;
+  }
+
+  if (trades.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ NO OPEN POSITIONS FOUND ]</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = trades.map(row => {
+    const typeEl = row.option_type === 'Call'
+      ? `<span class="badge-call">CALL</span>`
+      : `<span class="badge-put">PUT</span>`;
+
+    const sideEl = row.side === 'BUY'
+      ? `<span class="badge-buy">BUY</span>`
+      : (row.side === 'SELL' ? `<span class="badge-sell">SELL</span>` : `<span class="badge-mid">MID</span>`);
+
+    const pSuccess = row.p_success != null ? (row.p_success * 100).toFixed(1) + '%' : '--';
+    const pClass = row.p_success >= 0.70 ? 'accent-call' : (row.p_success <= 0.40 ? 'accent-coral' : '');
+    const kellyStr = row.kelly_capped != null ? (row.kelly_capped * 100).toFixed(1) + '%' : '--';
+    const stratStr = (row.predicted_strategy || '--').replace(/_/g, ' ');
+    const logDate = row.timestamp ? row.timestamp.split(' ')[0] : '--';
+
+    return `
+      <tr>
+        <td style="font-family: var(--font-mono);">${logDate}</td>
+        <td><strong>${row.ticker}</strong></td>
+        <td>${row.expiration || '--'}</td>
+        <td style="font-family: var(--font-mono);">$${fmt(row.strike)}</td>
+        <td>${typeEl}</td>
+        <td>${sideEl}</td>
+        <td style="font-family: var(--font-mono);">${fmt(row.vol_oi_ratio)}x</td>
+        <td style="font-family: var(--font-mono); font-weight: 500; color: var(--accent);">$${fmtK(row.premium)}</td>
+        <td style="font-family: var(--font-mono);">${row.dte || '--'}</td>
+        <td style="font-family: var(--font-mono); font-weight: 600;" class="${pClass}">${pSuccess}</td>
+        <td style="font-family: var(--font-mono); color: var(--buy);">${kellyStr}</td>
+        <td style="font-family: var(--font-mono); font-size: 10px;">${stratStr}</td>
+      </tr>
+    `;
+  }).join('');
 }
 
 
@@ -1363,8 +1327,10 @@ async function refreshML() {
 // ── Refresh Active View ──────────────────────────────────────
 async function refreshAll() {
   checkHealth();
-  if ($('view-tactical').style.display !== 'none') {
+  if ($('view-tactical') && $('view-tactical').style.display !== 'none') {
     await refreshTactical();
+  } else if ($('view-dashboard') && $('view-dashboard').style.display !== 'none') {
+    await refreshDashboard();
   } else {
     await refreshML();
   }
@@ -1441,62 +1407,699 @@ function setupEventListeners() {
   $('btn-refresh-all').addEventListener('click', () => refreshAll());
 
   // ML Form & Buttons
-  $('inference-form').addEventListener('submit', runManualInference);
-  $('btn-run-labeling').addEventListener('click', runLabeling);
-  $('btn-trigger-retrain').addEventListener('click', runRetraining);
-  $('btn-save-settings').addEventListener('click', saveSettings);
-
-  // Monitor form input modifications to sync state and auto-calculate
-  document.querySelectorAll('#inference-form input, #inference-form select').forEach((input) => {
-    input.addEventListener('input', () => {
-      // Re-calculate first if autocalc is enabled and this input isn't premium itself
-      if (input.id !== 'inf-premium') {
-        recalculateTheoreticalPremium();
-      } else {
-        // If they manually edit premium, turn off autocalc!
-        $('inf-autocalc').checked = false;
-      }
-      
-      const profileEl = $('prediction-target-profile');
-      if (profileEl) {
-        profileEl.textContent = 'TARGET PROFILE: CUSTOM MANUAL PARAMETERS';
-      }
-      document.querySelectorAll('#scanner-table tr, #ledger-table tr').forEach(r => r.classList.remove('active-row'));
-    });
-  });
-
-  // Re-calculate when auto-calc checkbox state toggles
-  $('inf-autocalc').addEventListener('change', () => {
-    recalculateTheoreticalPremium();
-  });
+  $('btn-run-labeling')?.addEventListener('click', runLabeling);
+  $('btn-trigger-retrain')?.addEventListener('click', runRetraining);
+  $('btn-save-settings')?.addEventListener('click', saveSettings);
 
   // Strategy filter for ledger table
   $('filter-ledger-strategy')?.addEventListener('change', renderLedgerTable);
 
   // Hash Navigation Routing
   window.addEventListener('hashchange', handleRouting);
+
+  // Backtester Config & Controllers
+  $('bt-mode')?.addEventListener('change', (e) => {
+    const isWalkforward = e.target.value === 'walkforward';
+    if (isWalkforward) {
+      $('walkforward-settings-group').style.display = 'grid';
+    } else {
+      $('walkforward-settings-group').style.display = 'none';
+    }
+  });
+
+  $('bt-strategy-type')?.addEventListener('change', (e) => {
+    const isScan = e.target.value === 'highest_prob_scan';
+    const group1 = $('bt-max-concurrent-group');
+    const group2 = $('bt-scan-time-group');
+    if (group1) group1.style.display = isScan ? 'flex' : 'none';
+    if (group2) group2.style.display = isScan ? 'flex' : 'none';
+  });
+
+  $('bt-kelly-multiplier')?.addEventListener('input', (e) => {
+    $('kelly-val-display').textContent = parseFloat(e.target.value).toFixed(2);
+  });
+
+  $('bt-stop-lambda')?.addEventListener('input', (e) => {
+    $('stop-val-display').textContent = parseFloat(e.target.value).toFixed(2);
+  });
+
+  $('bt-lookback-days')?.addEventListener('input', (e) => {
+    const val = parseInt(e.target.value);
+    const display = $('bt-lookback-display');
+    if (display) {
+      if (val === 0) {
+        display.textContent = 'ALL DATA';
+      } else if (val >= 365) {
+        display.textContent = (val / 365).toFixed(1) + ' YEARS';
+      } else {
+        display.textContent = val + ' DAYS';
+      }
+    }
+  });
+
+  $('bt-sweep-enable')?.addEventListener('change', (e) => {
+    const isChecked = e.target.checked;
+    if (isChecked) {
+      $('kelly-single-input').style.display = 'none';
+      $('stop-single-input').style.display = 'none';
+      $('kelly-sweep-inputs').style.display = 'grid';
+      $('stop-sweep-inputs').style.display = 'grid';
+      $('kelly-label-text').textContent = 'KELLY MULTIPLIER RANGE';
+      $('stop-label-text').textContent = 'STOP MULTIPLIER (λ) RANGE';
+      $('kelly-val-display').style.display = 'none';
+      $('stop-val-display').style.display = 'none';
+    } else {
+      $('kelly-single-input').style.display = 'block';
+      $('stop-single-input').style.display = 'block';
+      $('kelly-sweep-inputs').style.display = 'none';
+      $('stop-sweep-inputs').style.display = 'none';
+      $('kelly-label-text').textContent = 'KELLY MULTIPLIER';
+      $('stop-label-text').textContent = 'STOP MULTIPLIER (λ)';
+      $('kelly-val-display').style.display = 'inline';
+      $('stop-val-display').style.display = 'inline';
+    }
+  });
+
+  $('backtest-form')?.addEventListener('submit', runBacktestSimulation);
+  $('bt-heatmap-metric')?.addEventListener('change', renderSweepHeatmap);
+  $('bt-filter-ticker')?.addEventListener('input', renderBacktestLedgerTable);
+  $('bt-filter-exit')?.addEventListener('change', renderBacktestLedgerTable);
+
+  // Sorting for backtest transaction ledger
+  document.querySelectorAll('#bt-trades-table th[data-sort-bt]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sortBt;
+      if (state.backtestSortKey === key) {
+        state.backtestSortDir *= -1;
+      } else {
+        state.backtestSortKey = key;
+        state.backtestSortDir = -1;
+      }
+      
+      document.querySelectorAll('#bt-trades-table th').forEach((h) => {
+        h.classList.remove('active-sort');
+        const textNode = Array.from(h.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+        if (textNode) {
+          textNode.textContent = textNode.textContent.replace(/[▲▼]/g, '').trim() + ' ';
+        }
+      });
+      
+      th.classList.add('active-sort');
+      const textNode = Array.from(th.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+      if (textNode) {
+        textNode.textContent = textNode.textContent.trim() + (state.backtestSortDir === -1 ? ' ▼' : ' ▲');
+      }
+      
+      renderBacktestLedgerTable();
+    });
+  });
+
+  $('dash-filter-ticker')?.addEventListener('input', renderOpenTradesTable);
+  $('dash-filter-strategy')?.addEventListener('change', renderOpenTradesTable);
+  $('dash-sort-by')?.addEventListener('change', renderOpenTradesTable);
 }
 
 // ── Boot Sequence ────────────────────────────────────────────
 (async function boot() {
+  const statusEl = $('startup-status-text');
+  
   startClock();
   setupEventListeners();
+  initSidebar();
+  
+  // Disable interactive elements during startup sequence
+  document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
+    el.style.pointerEvents = 'none';
+  });
   
   // Resolve initial view
   handleRouting();
 
-  // Stagger loading to prevent API hammering
-  checkHealth();
+  // Keep track of boot start time to enforce a minimum screen duration of 1.2s for cinematic feel
+  const startTime = Date.now();
 
-  // Load tactical scanner first
-  setTimeout(() => fetchScanner(), 200);
-  setTimeout(() => fetchPCR(), 600);
-  setTimeout(() => fetchVolCon('SPY'), 1000);
-  setTimeout(() => fetchIVSkew('SPY'), 1400);
+  // Step 1: Health Diagnostics
+  if (statusEl) statusEl.textContent = 'RUNNING CORE SYSTEM DIAGNOSTICS...';
+  
+  // Run checkHealth and wait for it
+  let isCoreOnline = false;
+  try {
+    await checkHealth();
+    // Check state of health dots (online class)
+    isCoreOnline = $('status-core')?.classList.contains('online') || $('status-odp')?.classList.contains('online');
+  } catch (e) {
+    console.warn('Diagnostics exception during boot:', e);
+  }
 
-  // Load swing convergence alignment slightly later
-  setTimeout(() => fetchSwingAlignment(), 4000);
+  // Step 2: Update status message based on connectivity
+  if (statusEl) {
+    if (isCoreOnline) {
+      statusEl.textContent = 'CONNECTIVITY RESOLVED. SYNCING OPTIONS SCANNER REGISTRY...';
+    } else {
+      statusEl.textContent = 'ODP CORE OFFLINE. FALLING BACK TO OFFLINE TELEMETRY MATRIX...';
+    }
+  }
+
+  // Step 3: Trigger main visual telemetry data requests in parallel
+  const scannerPromise = fetchScanner();
+  const pcrPromise = fetchPCR();
+  const volConPromise = fetchVolCon('SPY');
+  const ivSkewPromise = fetchIVSkew('SPY');
+  const swingPromise = fetchSwingAlignment();
+
+  // Create a timeout promise to ensure slow APIs don't block startup indefinitely (max 3 seconds)
+  const apiTimeoutPromise = new Promise(resolve => setTimeout(resolve, 3000));
+  
+  // Await the essential scanner registry fetch or timeout
+  await Promise.race([
+    Promise.all([scannerPromise, pcrPromise, volConPromise, ivSkewPromise, swingPromise]),
+    apiTimeoutPromise
+  ]);
+
+  // Step 4: Ensure the loading animation stays visible for at least 1.2 seconds to prevent flashing
+  const elapsed = Date.now() - startTime;
+  const minDuration = 1200;
+  if (elapsed < minDuration) {
+    await new Promise(resolve => setTimeout(resolve, minDuration - elapsed));
+  }
+
+  // Step 5: Transition out the loading overlay (Shutter Blur & Fade-out)
+  const loader = $('startup-loader');
+  if (loader) {
+    loader.classList.add('fade-out');
+    // Once transition completes, hide completely and enable interactions
+    setTimeout(() => {
+      loader.style.display = 'none';
+      document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
+        el.style.pointerEvents = 'auto';
+      });
+    }, 600); // Matches the 600ms transition time
+  } else {
+    // Fallback if no loader element
+    document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
+      el.style.pointerEvents = 'auto';
+    });
+  }
 
   // Trigger background sync cycle (5 minutes)
   setInterval(refreshAll, 5 * 60 * 1000);
 })();
+
+
+// ══════════════════════════════════════════════════════════════
+// SIDEBAR COLLAPSE & BACKTEST ENGINE CLIENT INTERACTION
+// ══════════════════════════════════════════════════════════════
+
+function initSidebar() {
+  const sidebar = $('sidebar');
+  const toggleBtn = $('sidebar-toggle');
+  
+  if (!sidebar || !toggleBtn) return;
+  
+  // Load state from localStorage
+  const isCollapsed = localStorage.getItem('scylla:sidebar_collapsed') === 'true';
+  if (isCollapsed) {
+    sidebar.classList.add('collapsed');
+  } else {
+    sidebar.classList.remove('collapsed');
+  }
+  
+  toggleBtn.addEventListener('click', () => {
+    sidebar.classList.toggle('collapsed');
+    const nowCollapsed = sidebar.classList.contains('collapsed');
+    localStorage.setItem('scylla:sidebar_collapsed', nowCollapsed);
+  });
+}
+
+function showConfirmModal(onConfirm) {
+  const modal = $('confirm-modal');
+  const btnConfirm = $('btn-modal-confirm');
+  const btnCancel = $('btn-modal-cancel');
+  
+  if (!modal) return;
+  modal.style.display = 'flex';
+  
+  // Clone button to strip existing event listeners cleanly
+  const newConfirm = btnConfirm.cloneNode(true);
+  btnConfirm.replaceWith(newConfirm);
+  
+  newConfirm.addEventListener('click', () => {
+    modal.style.display = 'none';
+    onConfirm();
+  });
+  
+  btnCancel.onclick = () => {
+    modal.style.display = 'none';
+    state.directDevConfirmed = false;
+  };
+}
+
+async function runBacktestSimulation(e) {
+  if (e) e.preventDefault();
+  
+  const mode = $('bt-mode').value;
+  const initialCapital = parseFloat($('bt-initial-capital').value) || 100000;
+  const probThreshold = (parseFloat($('bt-prob-threshold').value) || 60) / 100.0;
+  const maxRisk = (parseFloat($('bt-max-risk').value) || 2.0) / 100.0;
+  const trainWindow = parseInt($('bt-train-window').value) || 50;
+  const testIncrement = parseInt($('bt-test-increment').value) || 10;
+  const isSweep = $('bt-sweep-enable').checked;
+  const strategyType = $('bt-strategy-type')?.value || 'standard';
+  const maxConcurrentTrades = parseInt($('bt-max-concurrent')?.value) || 1;
+  const scanTime = $('bt-scan-time')?.value.trim() || '10:00:00';
+  const minKellyFraction = (parseFloat($('bt-min-kelly-fraction')?.value) || 0) / 100.0;
+  const hardStopLoss = parseFloat($('bt-hard-stop-loss')?.value) || 0.0;
+  const lookbackDaysRaw = parseInt($('bt-lookback-days')?.value) || 0;
+  const lookbackDays = lookbackDaysRaw > 0 ? lookbackDaysRaw : null;  // 0 means "all data"
+
+  let confirmDirectDev = false;
+  if (mode === 'direct_dev') {
+    if (!state.directDevConfirmed) {
+      showConfirmModal(() => {
+        state.directDevConfirmed = true;
+        runBacktestSimulation();
+      });
+      return;
+    }
+    confirmDirectDev = true;
+  }
+  
+  // Show spinner or skeleton loading state
+  setLoading(true);
+  
+  try {
+    if (isSweep) {
+      const kellyMin = parseFloat($('bt-kelly-min').value) || 0.1;
+      const kellyMax = parseFloat($('bt-kelly-max').value) || 1.0;
+      const kellyStep = parseFloat($('bt-kelly-step').value) || 0.2;
+      const stopMin = parseFloat($('bt-stop-min').value) || 0.5;
+      const stopMax = parseFloat($('bt-stop-max').value) || 2.5;
+      const stopStep = parseFloat($('bt-stop-step').value) || 0.5;
+
+      const kellyList = [];
+      for (let k = kellyMin; k <= kellyMax; k = parseFloat((k + kellyStep).toFixed(4))) {
+        kellyList.push(k);
+      }
+      const stopList = [];
+      for (let s = stopMin; s <= stopMax; s = parseFloat((s + stopStep).toFixed(4))) {
+        stopList.push(s);
+      }
+
+      const totalCombos = kellyList.length * stopList.length;
+      if (totalCombos > 20) {
+        alert(`The parameter grid has ${totalCombos} combinations. Please adjust min/max/step values so that total combinations are 20 or fewer.`);
+        setLoading(false);
+        return;
+      }
+
+      const sweepResults = [];
+      const promises = [];
+
+      for (const kMult of kellyList) {
+        for (const sLam of stopList) {
+          const reqBody = {
+            mode: mode,
+            initial_capital: initialCapital,
+            prob_threshold: probThreshold,
+            kelly_multiplier: kMult,
+            kelly_cap: 0.25,
+            stop_lambda: sLam,
+            max_risk_pct_per_trade: maxRisk,
+            walkforward_train_window: trainWindow,
+            walkforward_test_increment: testIncrement,
+            confirm_direct_dev: confirmDirectDev,
+            strategy_type: strategyType,
+            max_concurrent_trades: maxConcurrentTrades,
+            scan_time: scanTime,
+            min_kelly_fraction: minKellyFraction,
+            hard_stop_loss: hardStopLoss,
+            lookback_days: lookbackDays
+          };
+          
+          promises.push(
+            fetch(`${API_BASE}/api/ml/backtest`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(reqBody)
+            }).then(async r => {
+              const data = await r.json();
+              if (!r.ok) throw new Error(data.detail || 'Backtest error');
+              sweepResults.push({
+                kelly: kMult,
+                lambda: sLam,
+                sharpe: data.summary.sharpe,
+                pnl: data.summary.cumulative_pnl_pct,
+                data: data
+              });
+            })
+          );
+        }
+      }
+
+      await Promise.all(promises);
+      state.backtestSweepResults = sweepResults;
+      
+      renderSweepHeatmap();
+      
+      // Load first cell results as default active
+      if (sweepResults.length > 0) {
+        // Sort sweep results so they display or activate consistently
+        sweepResults.sort((a, b) => b.pnl - a.pnl); // sort descending by PnL
+        loadBacktestData(sweepResults[0].data);
+      }
+
+      $('card-backtest-heatmap').style.display = 'block';
+    } else {
+      const kellyMultiplier = parseFloat($('bt-kelly-multiplier').value) || 0.5;
+      const stopLambda = parseFloat($('bt-stop-lambda').value) || 1.2;
+
+      const reqBody = {
+        mode: mode,
+        initial_capital: initialCapital,
+        prob_threshold: probThreshold,
+        kelly_multiplier: kellyMultiplier,
+        kelly_cap: 0.25,
+        stop_lambda: stopLambda,
+        max_risk_pct_per_trade: maxRisk,
+        walkforward_train_window: trainWindow,
+        walkforward_test_increment: testIncrement,
+        confirm_direct_dev: confirmDirectDev,
+        strategy_type: strategyType,
+        max_concurrent_trades: maxConcurrentTrades,
+        scan_time: scanTime,
+        min_kelly_fraction: minKellyFraction,
+        hard_stop_loss: hardStopLoss,
+        lookback_days: lookbackDays
+      };
+
+      const r = await fetch(`${API_BASE}/api/ml/backtest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reqBody)
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        alert(`Backtest Failed: ${data.detail || 'Unknown error'}`);
+        setLoading(false);
+        return;
+      }
+
+      state.backtestSweepResults = null;
+      $('card-backtest-heatmap').style.display = 'none';
+      loadBacktestData(data);
+    }
+  } catch (err) {
+    alert(`Simulation failed: ${err.message}`);
+  } finally {
+    setLoading(false);
+    state.directDevConfirmed = false;
+  }
+}
+
+function loadBacktestData(data) {
+  state.backtestResults = data;
+  
+  const warningBanner = $('bt-warning-banner');
+  if (data.in_sample_warning) {
+    warningBanner.style.display = 'flex';
+  } else {
+    warningBanner.style.display = 'none';
+  }
+
+  $('bt-summary-badge').textContent = data.mode.toUpperCase();
+  $('bt-sum-pnl').textContent = data.summary.cumulative_pnl_pct.toFixed(2) + '%';
+  const pnlUsdEl = $('bt-sum-pnl-usd');
+  if (pnlUsdEl && data.summary.cumulative_pnl_usd !== undefined) {
+    pnlUsdEl.textContent = (data.summary.cumulative_pnl_usd >= 0 ? '+$' : '-$') + Math.abs(data.summary.cumulative_pnl_usd).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    pnlUsdEl.className = 'tile-value ' + (data.summary.cumulative_pnl_usd >= 0 ? 'accent-call' : 'accent-coral');
+  }
+  const cagrEl = $('bt-sum-cagr');
+  if (cagrEl && data.summary.cagr_pct !== undefined) {
+    cagrEl.textContent = data.summary.cagr_pct.toFixed(2) + '%';
+  }
+  $('bt-sum-sharpe').textContent = data.summary.sharpe.toFixed(2);
+  $('bt-sum-sortino').textContent = data.summary.sortino.toFixed(2);
+  $('bt-sum-winloss').textContent = data.summary.win_loss_ratio.toFixed(2);
+  $('bt-sum-profitfactor').textContent = data.summary.profit_factor.toFixed(2);
+  $('bt-sum-maxdd').textContent = data.summary.max_drawdown_pct.toFixed(2) + '%';
+  $('bt-sum-triggered').textContent = `${data.summary.trades_triggered} / ${data.summary.trades_total_available}`;
+
+  // Win rate (new field)
+  const winRateEl = $('bt-sum-winrate');
+  if (winRateEl && data.summary.win_rate_pct !== undefined) {
+    winRateEl.textContent = data.summary.win_rate_pct.toFixed(1) + '%';
+  }
+
+  // Trade days info for Sharpe transparency
+  const tradeDaysEl = $('bt-sum-tradedays');
+  if (tradeDaysEl && data.summary.trade_days_used_for_sharpe !== undefined) {
+    tradeDaysEl.textContent = data.summary.trade_days_used_for_sharpe;
+  }
+  
+  $('card-backtest-summary').style.display = 'block';
+
+  // Display methodology warnings
+  const warningsEl = $('bt-warnings-container');
+  if (warningsEl && data.warnings && data.warnings.length > 0) {
+    warningsEl.innerHTML = data.warnings.map(w => {
+      const [tag, ...rest] = w.split(': ');
+      const msg = rest.join(': ');
+      return `<div class="bt-warning-line"><span class="badge-mid" style="font-size: 9px; margin-right: 6px;">${tag.toUpperCase()}</span><span style="color: var(--text-muted); font-size: 11px;">${msg}</span></div>`;
+    }).join('');
+    warningsEl.style.display = 'block';
+  } else if (warningsEl) {
+    warningsEl.style.display = 'none';
+  }
+
+  renderBacktestCharts(data);
+  $('card-backtest-chart-equity').style.display = 'block';
+  $('card-backtest-chart-drawdown').style.display = 'block';
+
+  renderBacktestLedgerTable();
+  $('card-backtest-trades').style.display = 'block';
+}
+
+function renderBacktestCharts(data) {
+  if (state.charts.btEquity) state.charts.btEquity.destroy();
+  if (state.charts.btDrawdown) state.charts.btDrawdown.destroy();
+
+  const labels = data.equity_curve.map(pt => pt.date);
+  const equityVals = data.equity_curve.map(pt => pt.equity);
+
+  let peak = equityVals[0] || 100000;
+  const ddVals = equityVals.map(eq => {
+    if (eq > peak) peak = eq;
+    return peak > 0 ? -((peak - eq) / peak * 100) : 0;
+  });
+
+  const ctxEquity = $('chart-bt-equity').getContext('2d');
+  state.charts.btEquity = new Chart(ctxEquity, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Portfolio Equity ($)',
+        data: equityVals,
+        borderColor: '#005566',
+        backgroundColor: 'rgba(0, 85, 102, 0.05)',
+        borderWidth: 1.5,
+        tension: 0.1,
+        fill: true,
+        pointRadius: labels.length > 100 ? 0 : 2
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        x: {
+          grid: { color: '#f0f0f0' },
+          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } }
+        },
+        y: {
+          grid: { color: '#f0f0f0' },
+          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 } }
+        }
+      }
+    }
+  });
+
+  const ctxDD = $('chart-bt-drawdown').getContext('2d');
+  state.charts.btDrawdown = new Chart(ctxDD, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Drawdown (%)',
+        data: ddVals,
+        borderColor: '#8b3a3a',
+        backgroundColor: 'rgba(139, 58, 58, 0.05)',
+        borderWidth: 1.5,
+        tension: 0.1,
+        fill: true,
+        pointRadius: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        x: {
+          grid: { color: '#f0f0f0' },
+          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } }
+        },
+        y: {
+          grid: { color: '#f0f0f0' },
+          ticks: {
+            color: '#666666',
+            font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 },
+            callback: value => value.toFixed(1) + '%'
+          }
+        }
+      }
+    }
+  });
+}
+
+function renderSweepHeatmap() {
+  const container = $('bt-heatmap-container');
+  if (!container || !state.backtestSweepResults) return;
+
+  const metric = $('bt-heatmap-metric').value;
+
+  const kellys = [...new Set(state.backtestSweepResults.map(r => r.kelly))].sort((a, b) => b - a);
+  const lambdas = [...new Set(state.backtestSweepResults.map(r => r.lambda))].sort((a, b) => a - b);
+
+  container.innerHTML = '';
+
+  container.style.gridTemplateColumns = `80px repeat(${lambdas.length}, 1fr)`;
+  container.style.display = 'grid';
+  container.style.gap = '3px';
+
+  const topLeft = document.createElement('div');
+  topLeft.className = 'heatmap-header-cell';
+  topLeft.innerHTML = 'K \\ λ';
+  container.appendChild(topLeft);
+
+  for (const lam of lambdas) {
+    const lamHeader = document.createElement('div');
+    lamHeader.className = 'heatmap-header-cell';
+    lamHeader.textContent = lam.toFixed(1);
+    container.appendChild(lamHeader);
+  }
+
+  const vals = state.backtestSweepResults.map(r => r[metric]);
+  const minVal = Math.min(...vals);
+  const maxVal = Math.max(...vals);
+  const range = maxVal - minVal || 1.0;
+
+  for (const k of kellys) {
+    const kLabel = document.createElement('div');
+    kLabel.className = 'heatmap-header-cell';
+    kLabel.style.justifyContent = 'flex-start';
+    kLabel.textContent = k.toFixed(2);
+    container.appendChild(kLabel);
+
+    for (const lam of lambdas) {
+      const match = state.backtestSweepResults.find(r => r.kelly === k && r.lambda === lam);
+      const cell = document.createElement('div');
+      cell.className = 'heatmap-cell';
+      
+      if (match) {
+        const val = match[metric];
+        cell.textContent = metric === 'pnl' ? val.toFixed(1) + '%' : val.toFixed(2);
+        
+        let r, g, b, alpha;
+        if (val >= 0) {
+          const ratio = maxVal > 0 ? val / maxVal : 0;
+          r = Math.round(18 + ratio * (143 - 18));
+          g = Math.round(19 + ratio * (163 - 19));
+          b = Math.round(22 + ratio * (130 - 22));
+          alpha = 0.3 + ratio * 0.5;
+        } else {
+          const ratio = minVal < 0 ? val / minVal : 0;
+          r = Math.round(18 + ratio * (191 - 18));
+          g = Math.round(19 + ratio * (90 - 19));
+          b = Math.round(22 + ratio * (90 - 22));
+          alpha = 0.3 + ratio * 0.5;
+        }
+        
+        cell.style.background = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        
+        cell.addEventListener('click', () => {
+          document.querySelectorAll('.heatmap-cell').forEach(c => c.style.border = '1px solid rgba(255,255,255,0.02)');
+          cell.style.border = '1px solid var(--accent)';
+          loadBacktestData(match.data);
+        });
+      } else {
+        cell.textContent = '—';
+        cell.style.background = 'var(--surface)';
+      }
+      
+      container.appendChild(cell);
+    }
+  }
+}
+
+function renderBacktestLedgerTable() {
+  const tbody = $('bt-trades-tbody');
+  if (!tbody || !state.backtestResults) return;
+
+  let txs = [...state.backtestResults.transactions];
+
+  const tickerFilter = $('bt-filter-ticker').value.trim().toUpperCase();
+  if (tickerFilter) {
+    txs = txs.filter(t => t.ticker.toUpperCase().includes(tickerFilter));
+  }
+
+  const exitFilter = $('bt-filter-exit').value;
+  if (exitFilter !== 'ALL') {
+    txs = txs.filter(t => t.exit_reason === exitFilter);
+  }
+
+  txs.sort((a, b) => {
+    let av = a[state.backtestSortKey], bv = b[state.backtestSortKey];
+    if (typeof av === 'string') av = av.toLowerCase(), bv = bv.toLowerCase();
+    if (av === undefined || av === null) return 1;
+    if (bv === undefined || bv === null) return -1;
+    return (av < bv ? -1 : av > bv ? 1 : 0) * state.backtestSortDir;
+  });
+
+  if (txs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10" class="table-empty">[ NO TRANSACTIONS FOUND MATCHING CRITERIA ]</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = txs.map(t => {
+    const isProfit = t.exit_reason === 'profit_hit';
+    const isStop = t.exit_reason === 'stop_hit';
+    
+    const statusBadge = isProfit 
+      ? '<span class="badge-buy">PROFIT HIT</span>' 
+      : (isStop ? '<span class="badge-sell">STOP HIT</span>' : '<span class="badge-mid">EXPIRED</span>');
+      
+    const pnlClass = t.pnl_usd >= 0 ? 'accent-call' : 'accent-coral';
+    const returnClass = t.observed_return >= 0 ? 'accent-call' : 'accent-coral';
+
+    return `
+      <tr>
+        <td style="font-weight: 600;">${t.ticker}</td>
+        <td>${t.trade_date}</td>
+        <td style="font-family: var(--font-mono); font-size: 11px;">${t.contract}</td>
+        <td>${(t.p_success * 100).toFixed(1)}%</td>
+        <td>${(t.kelly_fraction * 100).toFixed(1)}%</td>
+        <td style="font-family: var(--font-mono);">$${t.position_size_usd.toLocaleString()}</td>
+        <td style="font-family: var(--font-mono);">$${t.stop_price.toFixed(2)}</td>
+        <td class="${returnClass}" style="font-family: var(--font-mono);">${t.observed_return >= 0 ? '+' : ''}${(t.observed_return * 100).toFixed(2)}%</td>
+        <td class="${pnlClass}" style="font-family: var(--font-mono); font-weight: 600;">${t.pnl_usd >= 0 ? '+$' : '-$'}${Math.abs(t.pnl_usd).toLocaleString()}</td>
+        <td>${statusBadge}</td>
+      </tr>
+    `;
+  }).join('');
+}
