@@ -15,30 +15,56 @@
 <body>
 
 <!-- Startup Loading Overlay -->
-<div id="startup-loader" class="startup-loader-overlay">
+<div id="startup-loader" class="startup-loader-overlay iris-loader">
+  <div class="iris-background"></div>
+  
+  <div class="iris-scene">
+    <!-- Sleek Tech Hexagon -->
+    <svg class="iris-svg" viewBox="0 0 400 400">
+      <!-- Outer Rotating Ring -->
+      <circle class="iris-ring-outer" cx="200" cy="200" r="140" fill="none" stroke="var(--color-accent, #005566)" stroke-width="1.5" stroke-dasharray="80 30 10 30" stroke-linecap="round"/>
+      
+      <!-- Inner Fixed Ring with Nodes -->
+      <circle class="iris-ring" cx="200" cy="200" r="100" fill="none" stroke="var(--border-strong, #d0d0d0)" stroke-width="1"/>
+      <circle class="node node-1" cx="200" cy="100" r="4" fill="var(--color-accent, #005566)"/>
+      <circle class="node node-2" cx="286.6" cy="150" r="4" fill="var(--color-accent, #005566)"/>
+      <circle class="node node-3" cx="286.6" cy="250" r="4" fill="var(--color-accent, #005566)"/>
+      <circle class="node node-4" cx="200" cy="300" r="4" fill="var(--color-accent, #005566)"/>
+      <circle class="node node-5" cx="113.4" cy="250" r="4" fill="var(--color-accent, #005566)"/>
+      <circle class="node node-6" cx="113.4" cy="150" r="4" fill="var(--color-accent, #005566)"/>
+      
+      <!-- Central Geometric Structure (Hexagon) -->
+      <g class="iris-blades">
+        <polygon class="blade" points="200,120 269.3,160 269.3,240 200,280 130.7,240 130.7,160" fill="none" stroke="var(--color-accent, #005566)" stroke-width="2" stroke-linejoin="round"/>
+        <!-- Inner Connections -->
+        <line class="inner-line" x1="200" y1="120" x2="200" y2="280" stroke="var(--color-accent, #005566)" stroke-width="1" stroke-dasharray="4 4" opacity="0.5"/>
+        <line class="inner-line" x1="130.7" y1="160" x2="269.3" y2="240" stroke="var(--color-accent, #005566)" stroke-width="1" stroke-dasharray="4 4" opacity="0.5"/>
+        <line class="inner-line" x1="130.7" y1="240" x2="269.3" y2="160" stroke="var(--color-accent, #005566)" stroke-width="1" stroke-dasharray="4 4" opacity="0.5"/>
+        <!-- Core Pulse Dot -->
+        <circle class="iris-core" cx="200" cy="200" r="6" fill="var(--color-accent, #005566)"/>
+      </g>
+    </svg>
+    <div class="iris-flare"></div>
+  </div>
+  
   <div class="startup-loader-content">
-    <div class="logo-container">
-      <svg class="hex-logo" viewBox="0 0 100 100" width="120" height="120">
-        <polygon class="hex-polygon" points="50,5 93.3,30 93.3,80 50,95 6.7,80 6.7,30" fill="none" stroke="currentColor" stroke-width="2"/>
-        <text x="50" y="58" class="hex-text" text-anchor="middle" alignment-baseline="middle">⬡</text>
-      </svg>
-      <div class="logo-glow"></div>
+    <h1 class="startup-brand iris-text" id="startup-brand">
+      PROJECT: SCYLLA
+    </h1>
+    <div class="iris-status">
+      <span class="status-indicator"></span>
+      <span class="status-label">INITIALIZING TELEMETRY...</span>
     </div>
-    <h1 class="startup-brand">SCYLLA</h1>
-    <p class="startup-sub">INITIALIZING TELEMETRY MATRIX</p>
-    
-    <div class="loading-ring-container">
-      <div class="loading-ring-active"></div>
-    </div>
-    
-    <div class="loading-status" id="startup-status-text">ESTABLISHING SECURE API CONNECTION...</div>
   </div>
 </div>
 
 <aside id="sidebar" class="sidebar">
   <div class="sidebar-header">
     <div class="sidebar-brand">
-      <span class="brand-icon">⬡</span>
+      <svg class="brand-icon-svg" viewBox="0 0 100 100" width="24" height="24" style="margin-right: 8px;">
+        <polygon points="50,10 84.6,30 84.6,70 50,90 15.4,70 15.4,30" fill="none" stroke="var(--color-accent, #005566)" stroke-width="6" stroke-linejoin="round"/>
+        <circle cx="50" cy="50" r="10" fill="var(--color-accent, #005566)"/>
+      </svg>
       <span class="brand-text">SCYLLA</span>
     </div>
     <button id="sidebar-toggle" class="sidebar-toggle-btn" title="Toggle Sidebar">
@@ -47,15 +73,15 @@
   </div>
   <nav class="sidebar-nav">
     <a href="#tactical" class="nav-item active" id="nav-tactical">
-      <span class="nav-icon">◇</span>
+      <span class="nav-icon">⌂</span>
       <span class="nav-label">Scanner</span>
     </a>
     <a href="#dashboard" class="nav-item" id="nav-dashboard">
-      <span class="nav-icon">⚛</span>
+      <span class="nav-icon">◇</span>
       <span class="nav-label">Dashboard</span>
     </a>
     <a href="#backtest" class="nav-item" id="nav-backtest">
-      <span class="nav-icon">📊</span>
+      <span class="nav-icon">⬡</span>
       <span class="nav-label">Backtester</span>
     </a>
   </nav>
@@ -480,11 +506,16 @@
           <h2 class="card-title">STRATEGY BACKTEST CONFIGURATOR</h2>
           <span class="card-badge accent-gold">SIMULATION</span>
         </div>
+        <div class="card-header-right">
+          <div class="loading-indicator" id="backtest-loading">
+            <span class="spinner"></span> SIMULATING...
+          </div>
+        </div>
       </div>
       
       <div style="padding: 16px;">
         <form id="backtest-form">
-          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;">
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px;">
             <!-- Mode Selector -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">BACKTEST MODE</label>
@@ -524,13 +555,19 @@
             <!-- Min Kelly Fraction -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN KELLY ALLOCATION (%)</label>
-              <input type="number" id="bt-min-kelly-fraction" value="0" min="0" max="25" step="1" class="filter-input" />
+              <input type="number" id="bt-min-kelly-fraction" value="2" min="0" max="25" step="1" class="filter-input" />
             </div>
 
             <!-- Hard Stop Loss -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">HARD STOP LOSS (%)</label>
               <input type="number" id="bt-hard-stop-loss" value="2" min="0" max="50" step="0.5" class="filter-input" placeholder="0 = Dynamic" />
+            </div>
+
+            <!-- Profit Threshold -->
+            <div class="form-group" style="display: flex; flex-direction: column;">
+              <label class="field-label">PROFIT THRESHOLD (%)</label>
+              <input type="number" id="bt-profit-threshold" value="5" min="1" max="50" step="0.5" class="filter-input" placeholder="Override default 5%" />
             </div>
 
             <!-- Initial Capital -->
@@ -551,7 +588,7 @@
                 <label class="field-label">LOOKBACK PERIOD</label>
                 <span id="bt-lookback-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">ALL DATA</span>
               </div>
-              <input type="range" id="bt-lookback-days" min="0" max="730" value="0" step="30" class="filter-slider" />
+              <input type="range" id="bt-lookback-days" min="0" max="3650" value="0" step="30" class="filter-slider" />
               <div style="display: flex; justify-content: space-between; font-size: 9px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 3px;">
                 <span>ALL</span>
                 <span>30d</span>

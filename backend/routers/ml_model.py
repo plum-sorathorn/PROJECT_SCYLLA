@@ -410,15 +410,30 @@ def api_log_trade(trade: TradeSchema):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/ml/open-trades")
-def api_get_open_trades():
+def api_get_open_trades(
+    prob_threshold: Optional[float] = Query(default=0.60),
+    min_kelly_fraction: Optional[float] = Query(default=0.02)
+):
     try:
         settings = _get_settings()
         target_pct = float(settings.get("profit_threshold", "0.03"))
         
-        conn = sqlite3.connect(DB_PATH)
-        query = "SELECT * FROM options_trades WHERE labeled = 0 AND is_synthetic = 0 ORDER BY timestamp DESC"
-        df = pd.read_sql_query(query, conn)
-        conn.close()
+        from .unusual_options import scan_raw_options, SCAN_TICKERS
+        raw_options = scan_raw_options(",".join(SCAN_TICKERS), min_vol_oi=2.0, limit=100)
+        df = pd.DataFrame(raw_options)
+        
+        if not df.empty:
+            df = df.rename(columns={
+                'optionType': 'option_type',
+                'openInterest': 'open_interest',
+                'volOiRatio': 'vol_oi_ratio',
+                'impliedVolatility': 'implied_vol',
+                'underlierPrice': 'underlier_price',
+                'isWeekly': 'is_weekly',
+                'trendAlignment': 'trend_alignment'
+            })
+            if 'timestamp' not in df.columns:
+                df['timestamp'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         highest_prob_trade = None
         max_p_success = -1.0
@@ -572,12 +587,16 @@ def api_get_open_trades():
         df = df.where(pd.notnull(df), None)
         trades = df.to_dict(orient="records")
         
+        filtered_trades = []
         for t in trades:
-            if t.get('p_success') is not None and t['p_success'] > max_p_success:
-                max_p_success = t['p_success']
-                highest_prob_trade = t
+            if t.get('p_success') is not None and t['p_success'] >= prob_threshold:
+                if t.get('kelly_fraction') is not None and t['kelly_fraction'] >= min_kelly_fraction:
+                    filtered_trades.append(t)
+                    if t['p_success'] > max_p_success:
+                        max_p_success = t['p_success']
+                        highest_prob_trade = t
                 
-        return {"data": trades, "count": len(trades), "highest_probability": highest_prob_trade}
+        return {"data": filtered_trades, "count": len(filtered_trades), "highest_probability": highest_prob_trade}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1342,9 +1361,10 @@ class BacktestRequestSchema(BaseModel):
     strategy_type: Optional[str] = "standard"
     max_concurrent_trades: Optional[int] = 1
     scan_time: Optional[str] = "10:00:00"
-    min_kelly_fraction: Optional[float] = 0.0
+    min_kelly_fraction: Optional[float] = 0.02
     hard_stop_loss: Optional[float] = 2.0
     lookback_days: Optional[int] = None  # None = use all data; otherwise limit to last N calendar days
+    profit_threshold: Optional[float] = 0.05
 
 
 @router.post("/ml/backtest")
@@ -1367,7 +1387,7 @@ def api_backtest(req: BacktestRequestSchema):
 
     # Fetch settings/thresholds
     settings = _get_settings()
-    profit_threshold = float(settings.get("profit_threshold", "0.03"))
+    profit_threshold = req.profit_threshold if req.profit_threshold is not None else float(settings.get("profit_threshold", "0.03"))
     horizon_days = int(settings.get("horizon_days", "10"))
 
     conn = sqlite3.connect(DB_PATH)
@@ -1375,9 +1395,10 @@ def api_backtest(req: BacktestRequestSchema):
     df_real = get_real_trades(conn, labeled=1)
     conn.close()
 
-    # Apply lookback_days filter: restrict to trades within the last N calendar days
-    if req.lookback_days is not None and req.lookback_days > 0:
-        cutoff_date = (datetime.datetime.now() - datetime.timedelta(days=req.lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
+    # Apply lookback_days filter: restrict to trades within the last N calendar days of the dataset
+    if req.lookback_days is not None and req.lookback_days > 0 and not df_real.empty:
+        max_date = pd.to_datetime(df_real['timestamp']).max()
+        cutoff_date = (max_date - pd.Timedelta(days=req.lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
         df_real = df_real[df_real['timestamp'] >= cutoff_date].reset_index(drop=True)
 
     N = len(df_real)
@@ -1569,6 +1590,7 @@ def api_backtest(req: BacktestRequestSchema):
         end_date = max(p["exit_date"] for p in predictions)
 
     current_equity = req.initial_capital or 100000.0
+    available_capital = current_equity
     active_trades = []
     transactions = []
     daily_equity = []
@@ -1589,6 +1611,7 @@ def api_backtest(req: BacktestRequestSchema):
         for trade in active_trades:
             if trade["exit_date"] <= current_date:
                 current_equity += trade["pnl_usd"]
+                available_capital += trade["position_size_usd"] + trade["pnl_usd"]
             else:
                 active_remaining.append(trade)
         active_trades = active_remaining
@@ -1636,28 +1659,34 @@ def api_backtest(req: BacktestRequestSchema):
 
                     underlier_entry = float(row['underlier_price'])
                     if hard_stop_loss > 0.0:
-                        risk_per_unit = hard_stop_loss
-                        stop_price = underlier_entry * (1.0 - risk_per_unit)
+                        option_risk = hard_stop_loss
+                        stop_price = underlier_entry * (1.0 - option_risk * 0.1)
                     else:
-                        stop_price = underlier_entry * (1.0 + p10_pred * stop_lambda)
-                        risk_per_unit = abs(underlier_entry - stop_price) / underlier_entry
+                        option_risk = abs(p10_pred * stop_lambda)
+                        if option_risk > 1.0: option_risk = 1.0
+                        stop_price = underlier_entry * (1.0 - option_risk * 0.1)
 
-                    if risk_per_unit > 0:
-                        if kelly_fraction_final * risk_per_unit > max_risk_pct_per_trade:
-                            kelly_fraction_final = max_risk_pct_per_trade / risk_per_unit
+                    if option_risk > 0:
+                        if kelly_fraction_final * option_risk > max_risk_pct_per_trade:
+                            kelly_fraction_final = max_risk_pct_per_trade / option_risk
 
                     if kelly_fraction_final < min_kelly_fraction:
                         continue
 
                     position_size_usd = current_equity * kelly_fraction_final
+                    if position_size_usd > available_capital:
+                        position_size_usd = available_capital
 
                     if position_size_usd >= 0.01:
+                        available_capital -= position_size_usd
                         max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
                         observed_return = float(row['observed_return']) if row['observed_return'] is not None else 0.0
 
-                        if max_adverse_return <= -risk_per_unit:
+                        effective_stop = option_risk
+
+                        if max_adverse_return <= -effective_stop:
                             exit_reason = "stop_hit"
-                            trade_return = -risk_per_unit
+                            trade_return = -effective_stop
                         elif observed_return >= profit_threshold:
                             exit_reason = "profit_hit"
                             trade_return = profit_threshold
@@ -1669,7 +1698,8 @@ def api_backtest(req: BacktestRequestSchema):
 
                         active_trades.append({
                             "exit_date": p["exit_date"],
-                            "pnl_usd": pnl_usd
+                            "pnl_usd": pnl_usd,
+                            "position_size_usd": position_size_usd
                         })
 
                         contract_str = f"{row['ticker']} {row['expiration']} {row['option_type'][0].upper()}{row['strike']}"
@@ -1687,6 +1717,9 @@ def api_backtest(req: BacktestRequestSchema):
                         })
         else:
             for p in todays_candidates:
+                if len(active_trades) >= max_concurrent_trades:
+                    break
+
                 row = p["row"]
                 p_success = p["p_success"]
                 q_preds = p["quantiles"]
@@ -1701,30 +1734,37 @@ def api_backtest(req: BacktestRequestSchema):
 
                     underlier_entry = float(row['underlier_price'])
                     if hard_stop_loss > 0.0:
-                        risk_per_unit = hard_stop_loss
-                        stop_price = underlier_entry * (1.0 - risk_per_unit)
+                        option_risk = hard_stop_loss
+                        stop_price = underlier_entry * (1.0 - option_risk * 0.1)
                     else:
-                        stop_price = underlier_entry * (1.0 + p10_pred * stop_lambda)
-                        risk_per_unit = abs(underlier_entry - stop_price) / underlier_entry
+                        option_risk = abs(p10_pred * stop_lambda)
+                        if option_risk > 1.0: option_risk = 1.0
+                        stop_price = underlier_entry * (1.0 - option_risk * 0.1)
 
-                    if risk_per_unit > 0:
-                        if kelly_fraction_final * risk_per_unit > max_risk_pct_per_trade:
-                            kelly_fraction_final = max_risk_pct_per_trade / risk_per_unit
+                    if option_risk > 0:
+                        if kelly_fraction_final * option_risk > max_risk_pct_per_trade:
+                            kelly_fraction_final = max_risk_pct_per_trade / option_risk
 
                     if kelly_fraction_final < min_kelly_fraction:
                         continue
 
                     position_size_usd = current_equity * kelly_fraction_final
+                    if position_size_usd > available_capital:
+                        position_size_usd = available_capital
 
                     if position_size_usd < 0.01:
                         continue
 
+                    available_capital -= position_size_usd
+
                     max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
                     observed_return = float(row['observed_return']) if row['observed_return'] is not None else 0.0
 
-                    if max_adverse_return <= -risk_per_unit:
+                    effective_stop = option_risk
+
+                    if max_adverse_return <= -effective_stop:
                         exit_reason = "stop_hit"
-                        trade_return = -risk_per_unit
+                        trade_return = -effective_stop
                     elif observed_return >= profit_threshold:
                         exit_reason = "profit_hit"
                         trade_return = profit_threshold
@@ -1736,7 +1776,8 @@ def api_backtest(req: BacktestRequestSchema):
 
                     active_trades.append({
                         "exit_date": p["exit_date"],
-                        "pnl_usd": pnl_usd
+                        "pnl_usd": pnl_usd,
+                        "position_size_usd": position_size_usd
                     })
 
                     contract_str = f"{row['ticker']} {row['expiration']} {row['option_type'][0].upper()}{row['strike']}"
@@ -1761,33 +1802,27 @@ def api_backtest(req: BacktestRequestSchema):
 
         current_date += datetime.timedelta(days=1)
 
-    # ── Sharpe/Sortino: compute on TRADE-DAY returns only ─────────
-    # Using all calendar days (including flat/non-trade days) dilutes
-    # volatility with hundreds of 0.0 returns, inflating Sharpe by 3-5x.
-    # Instead, we compute returns only on days where equity actually changed.
+    # ── Sharpe/Sortino: compute on daily returns ─────────
     equity_values = [pt["equity"] for pt in daily_equity]
 
-    # Build trade-day returns: only include days where equity changed
-    trade_day_returns = []
+    daily_returns = []
+    n_trade_days = 0
     for idx in range(1, len(equity_values)):
         prev = equity_values[idx - 1]
         curr = equity_values[idx]
-        if prev > 0 and curr != prev:  # Skip flat days
-            trade_day_returns.append((curr - prev) / prev)
+        if prev > 0:
+            ret = (curr - prev) / prev
+            daily_returns.append(ret)
+            if ret != 0:
+                n_trade_days += 1
 
-    # Count total trade days (days with actual equity movement) for annualization
-    n_trade_days = len(trade_day_returns)
-
-    if n_trade_days > 1:
-        mean_return = float(np.mean(trade_day_returns))
-        std_return = float(np.std(trade_day_returns, ddof=1))
-        # Annualize using the actual trading frequency, not a fixed 252
-        total_calendar_days = max(len(equity_values) - 1, 1)
-        trades_per_year = (n_trade_days / total_calendar_days) * 365.0
-        annualization_factor = np.sqrt(trades_per_year)
+    if len(daily_returns) > 1:
+        mean_return = float(np.mean(daily_returns))
+        std_return = float(np.std(daily_returns, ddof=1))
+        annualization_factor = np.sqrt(365.0)
         sharpe = (mean_return / std_return) * annualization_factor if std_return > 0 else 0.0
 
-        neg_returns = [r for r in trade_day_returns if r < 0]
+        neg_returns = [r for r in daily_returns if r < 0]
         if neg_returns:
             downside_std = float(np.sqrt(np.mean([r**2 for r in neg_returns])))
             sortino = (mean_return / downside_std) * annualization_factor if downside_std > 0 else 0.0

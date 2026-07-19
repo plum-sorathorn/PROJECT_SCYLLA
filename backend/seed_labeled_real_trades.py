@@ -16,7 +16,7 @@ def seed():
     conn.commit()
     print("Cleared existing real trades from database.")
     
-    # We want to insert 1000 labeled real trades spread over 730 days (2 years)
+    # We want to insert 5000 labeled real trades spread over 3650 days (10 years)
     # Using a higher contrast score so model can differentiate and predict high probability setups.
     rng = random.Random(12345)
     
@@ -24,12 +24,12 @@ def seed():
     sides = ["BUY", "SELL"]
     alignments = ["BULL_ALIGNED", "BEAR_ALIGNED", "BULL_CONTRARIAN", "NEUTRAL"]
     
-    start_date = datetime.datetime.now() - datetime.timedelta(days=730)
+    start_date = datetime.datetime.now() - datetime.timedelta(days=3650)
     
     inserted_count = 0
-    for i in range(1000):
+    for i in range(5000):
         # Stagger dates chronologically
-        trade_time = start_date + datetime.timedelta(hours=i * 16.5)
+        trade_time = start_date + datetime.timedelta(hours=i * 17.5)
         timestamp_str = trade_time.strftime("%Y-%m-%d %H:%M:%S")
         
         ticker = rng.choice(tickers)
@@ -79,7 +79,7 @@ def seed():
         
     conn.commit()
     conn.close()
-    print(f"Successfully seeded {inserted_count} high-contrast real labeled trades spanning 2 years.")
+    print(f"Successfully seeded {inserted_count} high-contrast real labeled trades spanning 10 years.")
 
 if __name__ == "__main__":
     seed()

@@ -9,6 +9,9 @@ const API_BASE = 'http://127.0.0.1:6900';
 
 // ── State ──────────────────────────────────────────────────
 const state = {
+  // Application startup state
+  booting: false,
+
   // Tactical Console State
   scannerData: [],
   pcrData: {},
@@ -1188,7 +1191,10 @@ async function refreshDashboard() {
 async function fetchOpenTrades() {
   setLoading('dashboard-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/ml/open-trades`);
+    const probThreshold = (parseFloat($('bt-prob-threshold')?.value) || 60) / 100.0;
+    const minKellyFraction = (parseFloat($('bt-min-kelly-fraction')?.value) || 0) / 100.0;
+    
+    const r = await fetch(`${API_BASE}/api/ml/open-trades?prob_threshold=${probThreshold}&min_kelly_fraction=${minKellyFraction}`);
     const json = await r.json();
     state.dashboardOpenTrades = json.data || [];
 
@@ -1523,6 +1529,7 @@ function setupEventListeners() {
 (async function boot() {
   const statusEl = $('startup-status-text');
   
+  state.booting = true;
   startClock();
   setupEventListeners();
   initSidebar();
@@ -1535,7 +1542,7 @@ function setupEventListeners() {
   // Resolve initial view
   handleRouting();
 
-  // Keep track of boot start time to enforce a minimum screen duration of 1.2s for cinematic feel
+  // Keep track of boot start time to enforce a minimum screen duration of 1.5s for cinematic feel
   const startTime = Date.now();
 
   // Step 1: Health Diagnostics
@@ -1554,37 +1561,52 @@ function setupEventListeners() {
   // Step 2: Update status message based on connectivity
   if (statusEl) {
     if (isCoreOnline) {
-      statusEl.textContent = 'CONNECTIVITY RESOLVED. SYNCING OPTIONS SCANNER REGISTRY...';
+      statusEl.textContent = 'CONNECTIVITY RESOLVED. RUNNING SIMULATIONS & RETRIEVING OPTION FLOWS...';
     } else {
-      statusEl.textContent = 'ODP CORE OFFLINE. FALLING BACK TO OFFLINE TELEMETRY MATRIX...';
+      statusEl.textContent = 'ODP CORE OFFLINE. RETRIEVING CACHED FLOWS & SIMULATING BACKTESTS...';
     }
   }
 
-  // Step 3: Trigger main visual telemetry data requests in parallel
+  // Step 3: Trigger main visual telemetry data requests, dashboard, ML config, and backtest simulation in parallel
   const scannerPromise = fetchScanner();
   const pcrPromise = fetchPCR();
   const volConPromise = fetchVolCon('SPY');
   const ivSkewPromise = fetchIVSkew('SPY');
   const swingPromise = fetchSwingAlignment();
+  const dashboardPromise = refreshDashboard();
+  const mlPromise = refreshML();
+  const backtestPromise = runBacktestSimulation();
 
-  // Create a timeout promise to ensure slow APIs don't block startup indefinitely (max 3 seconds)
-  const apiTimeoutPromise = new Promise(resolve => setTimeout(resolve, 3000));
-  
-  // Await the essential scanner registry fetch or timeout
-  await Promise.race([
-    Promise.all([scannerPromise, pcrPromise, volConPromise, ivSkewPromise, swingPromise]),
-    apiTimeoutPromise
-  ]);
+  // Set loaded flags so view transitions are immediate
+  state.dashboardLoaded = true;
+  state.mlLoaded = true;
 
-  // Step 4: Ensure the loading animation stays visible for at least 1.2 seconds to prevent flashing
+  // Await ALL of them to complete or handle failures gracefully
+  try {
+    await Promise.all([
+      scannerPromise,
+      pcrPromise,
+      volConPromise,
+      ivSkewPromise,
+      swingPromise,
+      dashboardPromise,
+      mlPromise,
+      backtestPromise
+    ]);
+  } catch (e) {
+    console.warn('Error during boot data fetch:', e);
+  }
+
+  // Step 4: Ensure the loading animation stays visible for at least 1.5 seconds to prevent flashing
   const elapsed = Date.now() - startTime;
-  const minDuration = 1200;
+  const minDuration = 1500;
   if (elapsed < minDuration) {
     await new Promise(resolve => setTimeout(resolve, minDuration - elapsed));
   }
 
   // Step 5: Transition out the loading overlay (Shutter Blur & Fade-out)
   const loader = $('startup-loader');
+  state.booting = false;
   if (loader) {
     loader.classList.add('fade-out');
     // Once transition completes, hide completely and enable interactions
@@ -1593,7 +1615,7 @@ function setupEventListeners() {
       document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
         el.style.pointerEvents = 'auto';
       });
-    }, 600); // Matches the 600ms transition time
+    }, 800); // Matches the 800ms transition time
   } else {
     // Fallback if no loader element
     document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
@@ -1671,6 +1693,8 @@ async function runBacktestSimulation(e) {
   const hardStopLoss = parseFloat($('bt-hard-stop-loss')?.value) || 0.0;
   const lookbackDaysRaw = parseInt($('bt-lookback-days')?.value) || 0;
   const lookbackDays = lookbackDaysRaw > 0 ? lookbackDaysRaw : null;  // 0 means "all data"
+  const profitThresholdInput = parseFloat($('bt-profit-threshold')?.value);
+  const profitThreshold = !isNaN(profitThresholdInput) ? profitThresholdInput / 100.0 : null;
 
   let confirmDirectDev = false;
   if (mode === 'direct_dev') {
@@ -1685,7 +1709,7 @@ async function runBacktestSimulation(e) {
   }
   
   // Show spinner or skeleton loading state
-  setLoading(true);
+  setLoading('backtest-loading', true);
   
   try {
     if (isSweep) {
@@ -1707,8 +1731,12 @@ async function runBacktestSimulation(e) {
 
       const totalCombos = kellyList.length * stopList.length;
       if (totalCombos > 20) {
-        alert(`The parameter grid has ${totalCombos} combinations. Please adjust min/max/step values so that total combinations are 20 or fewer.`);
-        setLoading(false);
+        if (!state.booting) {
+          alert(`The parameter grid has ${totalCombos} combinations. Please adjust min/max/step values so that total combinations are 20 or fewer.`);
+        } else {
+          console.warn(`Boot backtest sweep combo count exceeds 20: ${totalCombos}`);
+        }
+        setLoading('backtest-loading', false);
         return;
       }
 
@@ -1733,7 +1761,8 @@ async function runBacktestSimulation(e) {
             scan_time: scanTime,
             min_kelly_fraction: minKellyFraction,
             hard_stop_loss: hardStopLoss,
-            lookback_days: lookbackDays
+            lookback_days: lookbackDays,
+            profit_threshold: profitThreshold
           };
           
           promises.push(
@@ -1789,7 +1818,8 @@ async function runBacktestSimulation(e) {
         scan_time: scanTime,
         min_kelly_fraction: minKellyFraction,
         hard_stop_loss: hardStopLoss,
-        lookback_days: lookbackDays
+        lookback_days: lookbackDays,
+        profit_threshold: profitThreshold
       };
 
       const r = await fetch(`${API_BASE}/api/ml/backtest`, {
@@ -1799,8 +1829,12 @@ async function runBacktestSimulation(e) {
       });
       const data = await r.json();
       if (!r.ok) {
-        alert(`Backtest Failed: ${data.detail || 'Unknown error'}`);
-        setLoading(false);
+        if (!state.booting) {
+          alert(`Backtest Failed: ${data.detail || 'Unknown error'}`);
+        } else {
+          console.error(`Boot backtest failed: ${data.detail || 'Unknown error'}`);
+        }
+        setLoading('backtest-loading', false);
         return;
       }
 
@@ -1809,9 +1843,13 @@ async function runBacktestSimulation(e) {
       loadBacktestData(data);
     }
   } catch (err) {
-    alert(`Simulation failed: ${err.message}`);
+    if (!state.booting) {
+      alert(`Simulation failed: ${err.message}`);
+    } else {
+      console.error(`Boot simulation failed: ${err.message}`);
+    }
   } finally {
-    setLoading(false);
+    setLoading('backtest-loading', false);
     state.directDevConfirmed = false;
   }
 }
