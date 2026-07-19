@@ -8,10 +8,14 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import pickle
+import joblib
+import lightgbm as lgb
 import logging
+from .ml_derivations import compute_calibrated_p_success, classify_strategy, kelly_fraction
 
 logger = logging.getLogger("scylla.ml_model")
 router = APIRouter()
+
 
 # Paths relative to the backend directory
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../scylla_ml.db"))
@@ -38,6 +42,7 @@ class TradeSchema(BaseModel):
     trendAlignment: str
 
 class PredictRequestSchema(BaseModel):
+    ticker: Optional[str] = "SPY"
     strike: float
     volume: int
     openInterest: int
@@ -55,6 +60,16 @@ class PredictRequestSchema(BaseModel):
     vix_level: Optional[float] = None
     log_premium: Optional[float] = None
     dte_bucket: Optional[str] = None
+
+class PredictResponseSchema(BaseModel):
+    quantiles: dict[str, float]      # {"p10": ..., "p25": ..., "p50": ..., "p75": ..., "p90": ...}
+    p_success: float
+    expected_return: float           # = p50
+    strategy: str                    # SIDEWAYS | BULLISH_BREAKOUT | BEARISH_BREAKDOWN | VOL_EXPANSION
+    strategy_confidence: float
+    kelly_fraction: float
+    kelly_fraction_uncapped: float
+    model_type: Optional[str] = None
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -80,6 +95,7 @@ def init_db():
             labeled INTEGER DEFAULT 0,
             label_success INTEGER DEFAULT NULL,
             observed_return REAL DEFAULT NULL,
+            max_adverse_return REAL DEFAULT NULL,
             evaluation_date TEXT DEFAULT NULL
         )
     """)
@@ -99,7 +115,12 @@ def init_db():
             cv_roc_auc_mean REAL,
             horizon_days INTEGER,
             profit_threshold REAL,
-            model_version TEXT
+            model_version TEXT,
+            pinball_loss_p10 REAL DEFAULT NULL,
+            pinball_loss_p25 REAL DEFAULT NULL,
+            pinball_loss_p50 REAL DEFAULT NULL,
+            pinball_loss_p75 REAL DEFAULT NULL,
+            pinball_loss_p90 REAL DEFAULT NULL
         )
     """)
 
@@ -114,8 +135,21 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO ml_settings (key, value) VALUES ('horizon_days', '10')")
     cursor.execute("INSERT OR IGNORE INTO ml_settings (key, value) VALUES ('profit_threshold', '0.03')")
 
+    # Run ALTER TABLE command to verify columns exist
+    try:
+        cursor.execute("ALTER TABLE options_trades ADD COLUMN max_adverse_return REAL DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
+
+    for q_col in ["pinball_loss_p10", "pinball_loss_p25", "pinball_loss_p50", "pinball_loss_p75", "pinball_loss_p90"]:
+        try:
+            cursor.execute(f"ALTER TABLE model_runs ADD COLUMN {q_col} REAL DEFAULT NULL")
+        except sqlite3.OperationalError:
+            pass
+
     conn.commit()
     conn.close()
+
 
 # Ensure database is initialized on import
 init_db()
@@ -285,6 +319,8 @@ def api_get_model_runs(limit: int = 50):
             conn, params=[limit]
         )
         conn.close()
+        # Replace NaN/NaT with None for JSON compliance
+        df = df.where(pd.notnull(df), None)
         runs = df.to_dict(orient="records")
         return {"data": runs, "count": len(runs)}
     except Exception as e:
@@ -351,6 +387,10 @@ def api_get_trades(
     offset: int = 0
 ):
     try:
+        # Fetch profit threshold to derive label_success at read time
+        settings = _get_settings()
+        target_pct = float(settings.get("profit_threshold", "0.03"))
+
         conn = sqlite3.connect(DB_PATH)
         query = "SELECT * FROM options_trades WHERE 1=1"
         params = []
@@ -368,6 +408,108 @@ def api_get_trades(
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
         
+        # Override label_success at read time based on continuous return (observed_return)
+        if not df.empty and 'observed_return' in df.columns:
+            # If trade is labeled, success is observed_return >= target_pct
+            df['label_success'] = df.apply(
+                lambda row: (1 if row['observed_return'] >= target_pct else 0) 
+                if row['labeled'] == 1 and row['observed_return'] is not None 
+                else row['label_success'], 
+                axis=1
+            )
+            # Make sure it handles NaN
+            df['label_success'] = df['label_success'].replace({np.nan: None})
+
+        # Predict P50 and Strategy for each trade row if the model exists
+        if not df.empty:
+            df['predicted_p50'] = None
+            df['predicted_strategy'] = None
+            
+            models = None
+            if os.path.exists(MODEL_PATH):
+                try:
+                    models = joblib.load(MODEL_PATH)
+                except Exception:
+                    pass
+                    
+            if models is not None:
+                try:
+                    horizon_days = int(settings.get("horizon_days", "10"))
+                    
+                    # Pre-populate HV cache for all unique tickers in the list
+                    for t in df['ticker'].unique():
+                        try:
+                            _fetch_historical_volatility(t)
+                        except Exception:
+                            pass
+                            
+                    feature_rows = []
+                    for _, row in df.iterrows():
+                        row_data = {
+                            'ticker': row['ticker'].upper(),
+                            'strike': row['strike'],
+                            'volume': row['volume'],
+                            'open_interest': row['open_interest'],
+                            'vol_oi_ratio': row['vol_oi_ratio'],
+                            'implied_vol': row['implied_vol'],
+                            'underlier_price': row['underlier_price'],
+                            'premium': row['premium'],
+                            'dte': row['dte'],
+                            'option_type': row['option_type'],
+                            'side': row['side'],
+                            'trend_alignment': row['trend_alignment']
+                        }
+                        
+                        row_data['moneyness'] = (row['strike'] - row['underlier_price']) / row['underlier_price']
+                        row_data['iv_hv_ratio'] = 1.0
+                        hv = _hv_cache.get(row_data['ticker'], 0.0)
+                        if hv > 0:
+                            row_data['iv_hv_ratio'] = row_data['implied_vol'] / hv
+                            
+                        row_data['vix_level'] = _vix_cache.get("value") or 20.0
+                        row_data['log_premium'] = float(np.log1p(max(row['premium'], 0)))
+                        row_data['dte_bucket'] = _dte_to_bucket(row['dte'])
+                        
+                        feature_rows.append(row_data)
+                    
+                    if feature_rows:
+                        feat_df = pd.DataFrame(feature_rows)
+                        
+                        p10_preds = models[0.1].predict(feat_df)
+                        p50_preds = models[0.5].predict(feat_df)
+                        p90_preds = models[0.9].predict(feat_df)
+                        
+                        predicted_p50s = []
+                        predicted_strategies = []
+                        
+                        for i in range(len(df)):
+                            p10_val = float(p10_preds[i])
+                            p50_val = float(p50_preds[i])
+                            p90_val = float(p90_preds[i])
+                            
+                            tk_hv = _hv_cache.get(feature_rows[i]['ticker'], 0.0)
+                            hv_dec = tk_hv / 100.0
+                            ticker_hv_30d = hv_dec * np.sqrt(horizon_days / 252.0)
+                            if ticker_hv_30d <= 0.0:
+                                ticker_hv_30d = 0.04
+                                
+                            iqr_threshold = 1.5 * ticker_hv_30d
+                            direction_threshold = 0.25 * ticker_hv_30d
+                            
+                            p10_sorted, p50_sorted, p90_sorted = sorted([p10_val, p50_val, p90_val])
+                            
+                            strat, _ = classify_strategy(p50_sorted, p10_sorted, p90_sorted, iqr_threshold, direction_threshold)
+                            
+                            predicted_p50s.append(round(p50_sorted, 4))
+                            predicted_strategies.append(strat)
+                            
+                        df['predicted_p50'] = predicted_p50s
+                        df['predicted_strategy'] = predicted_strategies
+                except Exception as pred_ex:
+                    logger.warning(f"Failed to compute dynamic predictions in api_get_trades: {pred_ex}")
+            
+        # Replace NaN/NaT with None for JSON compliance
+        df = df.where(pd.notnull(df), None)
         # Convert numeric fields to clean types
         trades = df.to_dict(orient="records")
         return {"data": trades, "count": len(trades)}
@@ -431,32 +573,36 @@ def api_label_trades(
                 is_bullish = (option_type == "Call" and side == "BUY") or (option_type == "Put" and side == "SELL")
                 
                 success = 0
-                observed_ret = 0.0
+                continuous_favorable_return = 0.0
+                max_adverse_return = 0.0
                 
                 if len(prices) > 0:
                     max_price = np.max(prices)
                     min_price = np.min(prices)
-                    final_price = prices[-1]
                     
                     if is_bullish:
-                        max_ret = (max_price - start_price) / start_price
-                        observed_ret = (final_price - start_price) / start_price
-                        if max_ret >= effective_threshold:
-                            success = 1
+                        continuous_favorable_return = (max_price - start_price) / start_price
+                        max_adverse_return = (min_price - start_price) / start_price
                     else:
-                        max_ret = (start_price - min_price) / start_price
-                        observed_ret = (start_price - final_price) / start_price
-                        if max_ret >= effective_threshold:
-                            success = 1
+                        continuous_favorable_return = (start_price - min_price) / start_price
+                        max_adverse_return = (start_price - max_price) / start_price
+                    
+                    if continuous_favorable_return >= effective_threshold:
+                        success = 1
                 
                 cursor.execute("""
                     UPDATE options_trades
                     SET labeled = 1,
                         label_success = ?,
                         observed_return = ?,
+                        max_adverse_return = ?,
                         evaluation_date = ?
                     WHERE id = ?
-                """, (success, round(float(observed_ret), 4), end_date.strftime("%Y-%m-%d"), trade_id))
+                """, (success, 
+                      round(float(continuous_favorable_return), 4), 
+                      round(float(max_adverse_return), 4), 
+                      end_date.strftime("%Y-%m-%d"), 
+                      trade_id))
                 conn.commit()
                 labeled_count += 1
                 
@@ -477,14 +623,12 @@ def api_label_trades(
 @router.post("/ml/train")
 def api_train_model():
     try:
-        from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
-        from sklearn.ensemble import GradientBoostingClassifier
+        from sklearn.model_selection import train_test_split
         from sklearn.preprocessing import StandardScaler, OneHotEncoder
         from sklearn.compose import ColumnTransformer
         from sklearn.pipeline import Pipeline
         from sklearn.impute import SimpleImputer
         from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-        from sklearn.utils.class_weight import compute_sample_weight
     except ImportError:
         raise HTTPException(status_code=500, detail="sklearn package is not installed in Python environment. Run 'pip install scikit-learn' first.")
         
@@ -550,15 +694,16 @@ def api_train_model():
                 prob = 1.0 / (1.0 + np.exp(-score))
                 success = 1 if rng.random() < prob else 0
                 observed_ret = round(rng.uniform(-0.15, 0.25) if success else rng.uniform(-0.50, -0.01), 4)
+                max_adverse = round(rng.uniform(-0.10, -0.01), 4) if success else round(observed_ret * rng.uniform(1.0, 1.2), 4)
                 
                 cursor.execute("""
                     INSERT INTO options_trades (
                         timestamp, ticker, expiration, strike, option_type, volume, 
                         open_interest, vol_oi_ratio, implied_vol, underlier_price, 
-                        premium, side, dte, is_weekly, trend_alignment, labeled, label_success, observed_return, evaluation_date
-                    ) VALUES (?, ?, '2026-08-20', ?, ?, 1000, 200, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?)
+                        premium, side, dte, is_weekly, trend_alignment, labeled, label_success, observed_return, max_adverse_return, evaluation_date
+                    ) VALUES (?, ?, '2026-08-20', ?, ?, 1000, 200, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?)
                 """, (
-                    historical_date, ticker, strike, opt_type, vol_oi, iv, underlier, premium, side, dte, trend, success, observed_ret, eval_date
+                    historical_date, ticker, strike, opt_type, vol_oi, iv, underlier, premium, side, dte, trend, success, observed_ret, max_adverse, eval_date
                 ))
             conn.commit()
             
@@ -576,8 +721,10 @@ def api_train_model():
         ]
         categorical_features = ['option_type', 'side', 'trend_alignment', 'dte_bucket']
         
-        X = df[numeric_features + categorical_features]
-        y = df['label_success']
+        # Include ticker column in the features DataFrame
+        X = df[['ticker'] + numeric_features + categorical_features]
+        # Target variable is continuous signed max-favorable return
+        y = df['observed_return']
         
         # Build processing pipeline
         numeric_transformer = Pipeline(steps=[
@@ -594,87 +741,149 @@ def api_train_model():
             transformers=[
                 ('num', numeric_transformer, numeric_features),
                 ('cat', categorical_transformer, categorical_features)
-            ]
+            ],
+            remainder='drop'
         )
         
-        clf = Pipeline(steps=[
-            ('preprocessor', preprocessor),
-            ('classifier', GradientBoostingClassifier(
-                n_estimators=150,
-                learning_rate=0.1,
-                max_depth=4,
-                random_state=42,
-                subsample=0.8
-            ))
-        ])
-        
-        # ── 5-Fold Stratified Cross Validation ────────────────
-        cv_roc_auc_mean = 0.0
-        try:
-            skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-            cv_scores = cross_val_score(clf, X, y, cv=skf, scoring='roc_auc')
-            cv_roc_auc_mean = float(np.mean(cv_scores))
-        except Exception as cv_ex:
-            logger.warning(f"Cross-validation failed (possibly too few samples per class): {cv_ex}")
-            cv_roc_auc_mean = 0.0
+        # ── Split ───────────────────────────────────────
+        X_train, X_test, y_train_continuous, y_test_continuous = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        # ── Split & Fit ───────────────────────────────────────
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # 5 independent LightGBM regressors, one per quantile
+        QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
+        models = {}
+        for q in QUANTILES:
+            pipe = Pipeline([
+                ("preprocess", preprocessor),
+                ("regressor", lgb.LGBMRegressor(
+                    objective="quantile",
+                    alpha=q,
+                    n_estimators=300,
+                    learning_rate=0.05,
+                    num_leaves=31,
+                    min_child_samples=20,
+                    random_state=42,
+                    verbose=-1
+                ))
+            ])
+            pipe.fit(X_train, y_train_continuous)
+            models[q] = pipe
+
+        # Enforce quantile monotonicity post-fit & compute pinball loss
+        pinball_losses = {}
+        test_preds_q = {}
+        for q in QUANTILES:
+            test_preds_q[q] = models[q].predict(X_test)
+            
+        num_triggered = 0
+        total_rows = len(X_test)
+        for i in range(total_rows):
+            row_vals = [test_preds_q[q][i] for q in QUANTILES]
+            if row_vals != sorted(row_vals):
+                num_triggered += 1
+        pct_triggered = (num_triggered / total_rows) * 100 if total_rows > 0 else 0
+        logger.info(f"Quantile monotonicity enforcement triggered on {num_triggered}/{total_rows} ({pct_triggered:.2f}%) validation rows.")
+
+        for q in QUANTILES:
+            diff = y_test_continuous - test_preds_q[q]
+            loss = np.mean(np.maximum(q * diff, (q - 1) * diff))
+            pinball_losses[q] = float(loss)
+
+        # Backtest calibration coverage
+        coverages = {}
+        for q in [0.1, 0.5, 0.9]:
+            coverages[q] = float(np.mean(y_test_continuous <= test_preds_q[q]))
+        logger.info(f"Quantile Calibration Coverage: P10={coverages[0.1]:.2%}, P50={coverages[0.5]:.2%}, P90={coverages[0.9]:.2%}")
+
+        # Post-hoc evaluation of binary metrics on the median model
+        settings = _get_settings()
+        profit_threshold = float(settings.get("profit_threshold", "0.03"))
         
-        # Compute balanced sample weights for class imbalance
-        sample_weights = compute_sample_weight('balanced', y_train)
+        y_test_binary = (y_test_continuous >= profit_threshold).astype(int)
+        test_preds_median = test_preds_q[0.5]
+        test_preds_binary = (test_preds_median >= profit_threshold).astype(int)
         
-        # Fit preprocessor first, then pass weights to classifier
-        clf.fit(X_train, y_train, classifier__sample_weight=sample_weights)
-        
-        train_preds = clf.predict(X_train)
-        test_preds = clf.predict(X_test)
-        
-        # Compute ROC AUC (needs probability estimates)
+        train_preds_median = models[0.5].predict(X_train)
+        y_train_binary = (y_train_continuous >= profit_threshold).astype(int)
+        train_preds_binary = (train_preds_median >= profit_threshold).astype(int)
+
         test_roc_auc = 0.0
         try:
-            test_proba = clf.predict_proba(X_test)[:, 1]
-            test_roc_auc = float(roc_auc_score(y_test, test_proba))
+            test_roc_auc = float(roc_auc_score(y_test_binary, test_preds_median))
         except Exception:
-            test_roc_auc = 0.0
-        
+            pass
+
+        # Manual Stratified K-Fold CV for median model
+        cv_roc_auc_mean = 0.0
+        try:
+            from sklearn.model_selection import StratifiedKFold
+            skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+            cv_scores = []
+            y_binary = (y >= profit_threshold).astype(int)
+            for train_idx, val_idx in skf.split(X, y_binary):
+                X_tr, X_va = X.iloc[train_idx], X.iloc[val_idx]
+                y_tr_cont, y_va_bin = y.iloc[train_idx], y_binary.iloc[val_idx]
+                
+                fold_pipe = Pipeline(steps=[
+                    ('preprocess', preprocessor),
+                    ('regressor', lgb.LGBMRegressor(
+                        objective="quantile",
+                        alpha=0.5,
+                        n_estimators=300,
+                        learning_rate=0.05,
+                        num_leaves=31,
+                        min_child_samples=20,
+                        verbose=-1,
+                        random_state=42
+                    ))
+                ])
+                fold_pipe.fit(X_tr, y_tr_cont)
+                preds_val = fold_pipe.predict(X_va)
+                cv_scores.append(roc_auc_score(y_va_bin, preds_val))
+            cv_roc_auc_mean = float(np.mean(cv_scores))
+        except Exception as cv_ex:
+            logger.warning(f"Cross-validation failed: {cv_ex}")
+            cv_roc_auc_mean = 0.0
+
         metrics = {
-            "train_accuracy": float(accuracy_score(y_train, train_preds)),
-            "test_accuracy": float(accuracy_score(y_test, test_preds)),
-            "test_precision": float(precision_score(y_test, test_preds, zero_division=0)),
-            "test_recall": float(recall_score(y_test, test_preds, zero_division=0)),
-            "test_f1": float(f1_score(y_test, test_preds, zero_division=0)),
+            "train_accuracy": float(accuracy_score(y_train_binary, train_preds_binary)),
+            "test_accuracy": float(accuracy_score(y_test_binary, test_preds_binary)),
+            "test_precision": float(precision_score(y_test_binary, test_preds_binary, zero_division=0)),
+            "test_recall": float(recall_score(y_test_binary, test_preds_binary, zero_division=0)),
+            "test_f1": float(f1_score(y_test_binary, test_preds_binary, zero_division=0)),
             "test_roc_auc": test_roc_auc,
             "cv_roc_auc_mean": cv_roc_auc_mean,
             "samples_count": len(df)
         }
-        
-        # Get feature importances
-        preprocessor_fit = clf.named_steps['preprocessor']
+
+        # Aggregate feature importances across the 5 models
+        preprocessor_fit = models[0.5].named_steps['preprocess']
         ohe_cols = list(preprocessor_fit.named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features))
         all_features = numeric_features + ohe_cols
-        importances = clf.named_steps['classifier'].feature_importances_
+        
+        mean_importances = np.mean([models[q].named_steps['regressor'].feature_importances_ for q in QUANTILES], axis=0)
+        sum_imp = np.sum(mean_importances)
+        if sum_imp > 0:
+            mean_importances = mean_importances / sum_imp
         
         feat_imp = []
-        for feat, imp in zip(all_features, importances):
+        for feat, imp in zip(all_features, mean_importances):
             feat_imp.append({"feature": feat, "importance": round(float(imp), 4)})
         feat_imp.sort(key=lambda x: x["importance"], reverse=True)
-        
-        # Save model
-        with open(MODEL_PATH, 'wb') as f:
-            pickle.dump(clf, f)
 
-        # ── Log training run to model_runs audit table ────────
+        # Save model dict
+        joblib.dump(models, MODEL_PATH)
+
+        # Log training run to model_runs audit table
         try:
-            settings = _get_settings()
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO model_runs (
                     timestamp, samples_count, train_accuracy, test_accuracy,
                     test_precision, test_recall, test_f1, test_roc_auc,
-                    cv_roc_auc_mean, horizon_days, profit_threshold, model_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cv_roc_auc_mean, horizon_days, profit_threshold, model_version,
+                    pinball_loss_p10, pinball_loss_p25, pinball_loss_p50, pinball_loss_p75, pinball_loss_p90
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 metrics["samples_count"],
@@ -686,8 +895,13 @@ def api_train_model():
                 metrics["test_roc_auc"],
                 metrics["cv_roc_auc_mean"],
                 int(settings.get("horizon_days", "10")),
-                float(settings.get("profit_threshold", "0.03")),
-                "gradient_boosting_v2"
+                profit_threshold,
+                "lightgbm_quantile_v1",
+                pinball_losses[0.1],
+                pinball_losses[0.25],
+                pinball_losses[0.5],
+                pinball_losses[0.75],
+                pinball_losses[0.9]
             ))
             conn.commit()
             conn.close()
@@ -700,18 +914,42 @@ def api_train_model():
             "feature_importances": feat_imp[:10]
         }
     except Exception as e:
+        logger.exception("Failed in api_train_model")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def enforce_monotonic_quantiles(preds: dict) -> dict:
+    """Enforces monotonicity across predictions: P10 <= P25 <= P50 <= P75 <= P90."""
+    keys = ["p10", "p25", "p50", "p75", "p90"]
+    vals = sorted([preds[k] for k in keys])
+    return {k: v for k, v in zip(keys, vals)}
 
 
 # ═══════════════════════════════════════════════════════════════
 # PREDICTION / INFERENCE
 # ═══════════════════════════════════════════════════════════════
 
-@router.post("/ml/predict")
+@router.post("/ml/predict", response_model=PredictResponseSchema)
 def api_predict(req: PredictRequestSchema):
     try:
+        # Get settings/thresholds
+        settings = _get_settings()
+        profit_threshold = float(settings.get("profit_threshold", "0.03"))
+        horizon_days = int(settings.get("horizon_days", "10"))
+        
+        # Historical Volatility
+        hv_ticker = (req.ticker or "SPY").upper()
+        hv_annual_pct = _fetch_historical_volatility(hv_ticker)
+        hv_annual_dec = hv_annual_pct / 100.0
+        ticker_hv_30d = hv_annual_dec * np.sqrt(horizon_days / 252.0)
+        if ticker_hv_30d <= 0.0:
+            ticker_hv_30d = 0.04  # fallback 10-day vol (20% annualized)
+            
+        iqr_threshold = 1.5 * ticker_hv_30d
+        direction_threshold = 0.25 * ticker_hv_30d
+
         if not os.path.exists(MODEL_PATH):
-            # Fallback score based on basic heuristics if model doesn't exist
+            # Fallback heuristic score mapping
             score = 0.5
             if req.volOiRatio > 5.0:
                 score += 0.1
@@ -719,13 +957,66 @@ def api_predict(req: PredictRequestSchema):
                 score += 0.15
             if req.side == 'BUY':
                 score += 0.05
-            return {"probability": round(min(score, 0.95), 2), "model_type": "heuristic_fallback"}
             
-        with open(MODEL_PATH, 'rb') as f:
-            model = pickle.load(f)
+            p_success_heuristic = min(score, 0.95)
+            # Create a degenerate quantile spread flat +/-5% around heuristic point estimate (P50=0.03)
+            median_val = 0.03
+            quantiles = {
+                "p10": median_val - 0.05,
+                "p25": median_val - 0.025,
+                "p50": median_val,
+                "p75": median_val + 0.025,
+                "p90": median_val + 0.05
+            }
+            
+            p_success = compute_calibrated_p_success(profit_threshold, **quantiles)
+            strategy, confidence = classify_strategy(quantiles["p50"], quantiles["p10"], quantiles["p90"], iqr_threshold, direction_threshold)
+            capped_kelly, uncapped_kelly = kelly_fraction(p_success, quantiles["p50"], quantiles["p10"], quantiles["p90"])
+            
+            return {
+                "quantiles": quantiles,
+                "p_success": round(p_success, 4),
+                "expected_return": round(quantiles["p50"], 4),
+                "strategy": strategy,
+                "strategy_confidence": confidence,
+                "kelly_fraction": round(capped_kelly, 4),
+                "kelly_fraction_uncapped": round(uncapped_kelly, 4),
+                "model_type": "heuristic_fallback"
+            }
+            
+        # Try loading models
+        try:
+            models = joblib.load(MODEL_PATH)
+            if not isinstance(models, dict) or not all(q in models for q in [0.1, 0.25, 0.5, 0.75, 0.9]):
+                raise ValueError("Model is not in multi-quantile dict format.")
+        except Exception as load_ex:
+            logger.warning(f"Could not load multi-quantile model: {load_ex}")
+            # Heuristic fallback path
+            median_val = 0.03
+            quantiles = {
+                "p10": median_val - 0.05,
+                "p25": median_val - 0.025,
+                "p50": median_val,
+                "p75": median_val + 0.025,
+                "p90": median_val + 0.05
+            }
+            p_success = compute_calibrated_p_success(profit_threshold, **quantiles)
+            strategy, confidence = classify_strategy(quantiles["p50"], quantiles["p10"], quantiles["p90"], iqr_threshold, direction_threshold)
+            capped_kelly, uncapped_kelly = kelly_fraction(p_success, quantiles["p50"], quantiles["p10"], quantiles["p90"])
+            return {
+                "quantiles": quantiles,
+                "p_success": round(p_success, 4),
+                "expected_return": round(quantiles["p50"], 4),
+                "strategy": strategy,
+                "strategy_confidence": confidence,
+                "kelly_fraction": round(capped_kelly, 4),
+                "kelly_fraction_uncapped": round(uncapped_kelly, 4),
+                "model_type": "heuristic_fallback"
+            }
         
         # Build base feature row
         row_data = {
+            'ticker': hv_ticker,
             'strike': req.strike,
             'volume': req.volume,
             'open_interest': req.openInterest,
@@ -739,18 +1030,40 @@ def api_predict(req: PredictRequestSchema):
             'trend_alignment': req.trendAlignment
         }
         
-        # Compute advanced features if not provided in request
         row_data['moneyness'] = req.moneyness if req.moneyness is not None else (req.strike - req.underlierPrice) / req.underlierPrice
         row_data['iv_hv_ratio'] = req.iv_hv_ratio if req.iv_hv_ratio is not None else 1.0
         row_data['vix_level'] = req.vix_level if req.vix_level is not None else _fetch_vix_level()
         row_data['log_premium'] = req.log_premium if req.log_premium is not None else float(np.log1p(max(req.premium, 0)))
         row_data['dte_bucket'] = req.dte_bucket if req.dte_bucket is not None else _dte_to_bucket(req.dte)
 
-        df = pd.DataFrame([row_data])
+        df_row = pd.DataFrame([row_data])
         
-        prob = model.predict_proba(df)[0][1]
-        return {"probability": round(float(prob), 4), "model_type": "gradient_boosting_v2"}
+        # Predict all 5 quantiles
+        preds = {}
+        q_map = {0.1: "p10", 0.25: "p25", 0.5: "p50", 0.75: "p75", 0.9: "p90"}
+        for q, key in q_map.items():
+            preds[key] = float(models[q].predict(df_row)[0])
+            
+        # Enforce monotonicity post-fit
+        preds = enforce_monotonic_quantiles(preds)
+        
+        # Derive values
+        p_success = compute_calibrated_p_success(profit_threshold, **preds)
+        strategy, confidence = classify_strategy(preds["p50"], preds["p10"], preds["p90"], iqr_threshold, direction_threshold)
+        capped_kelly, uncapped_kelly = kelly_fraction(p_success, preds["p50"], preds["p10"], preds["p90"])
+        
+        return {
+            "quantiles": preds,
+            "p_success": round(p_success, 4),
+            "expected_return": round(preds["p50"], 4),
+            "strategy": strategy,
+            "strategy_confidence": confidence,
+            "kelly_fraction": round(capped_kelly, 4),
+            "kelly_fraction_uncapped": round(uncapped_kelly, 4),
+            "model_type": "lightgbm_quantile_v1"
+        }
     except Exception as e:
+        logger.exception("Error in predict endpoint")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -761,6 +1074,10 @@ def api_predict(req: PredictRequestSchema):
 @router.get("/ml/stats")
 def api_get_stats():
     try:
+        # Fetch profit threshold to count successful trades at read time
+        settings = _get_settings()
+        target_pct = float(settings.get("profit_threshold", "0.03"))
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
@@ -770,7 +1087,8 @@ def api_get_stats():
         cursor.execute("SELECT COUNT(*) FROM options_trades WHERE labeled = 1")
         labeled_trades = cursor.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE labeled = 1 AND label_success = 1")
+        # Success is defined as observed_return >= target_pct
+        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE labeled = 1 AND observed_return >= ?", (target_pct,))
         successful_trades = cursor.fetchone()[0]
         
         conn.close()

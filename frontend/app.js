@@ -154,6 +154,7 @@ function recalculateTheoreticalPremium() {
 // ── ML Inference Form Target Profile Sync ────────────────────
 function loadTradeIntoPredictor(trade, source) {
   const ticker = (trade.ticker || '').toUpperCase();
+  state.activeTicker = ticker;
   const strike = trade.strike ?? 0;
   const optionType = trade.optionType || trade.option_type || 'Call';
   const side = trade.side || 'BUY';
@@ -825,11 +826,22 @@ function renderLedgerTable() {
   const tbody = $('ledger-tbody');
   
   if (!state.mlTrades.length) {
-    tbody.innerHTML = `<tr><td colspan="11" class="table-empty">[ NO HISTORICAL OPTIONS LOGS RECORDED IN DATABASE ]</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ NO HISTORICAL OPTIONS LOGS RECORDED IN DATABASE ]</td></tr>`;
     return;
   }
   
-  const rows = state.mlTrades.map((row, idx) => {
+  const strategyFilter = $('filter-ledger-strategy')?.value || 'ALL';
+  let filteredTrades = [...state.mlTrades];
+  if (strategyFilter !== 'ALL') {
+    filteredTrades = filteredTrades.filter(row => row.predicted_strategy === strategyFilter);
+  }
+  
+  if (!filteredTrades.length) {
+    tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ NO HISTORICAL OPTIONS LOGS MATCHING SELECTED STRATEGY ]</td></tr>`;
+    return;
+  }
+  
+  const rows = filteredTrades.map((row, idx) => {
     const typeEl = row.option_type === 'Call'
       ? `<span class="badge-call">CALL</span>`
       : `<span class="badge-put">PUT</span>`;
@@ -848,6 +860,11 @@ function renderLedgerTable() {
       ? `<span class="${retVal >= 0 ? 'em-plus' : 'em-minus'}">${retVal >= 0 ? '+' : ''}${fmtPct(retVal)}</span>`
       : '—';
       
+    const predP50 = row.predicted_p50;
+    const predP50El = predP50 != null
+      ? `<span style="font-family: var(--font-mono); color: var(--accent);">${predP50 >= 0 ? '+' : ''}${(predP50 * 100).toFixed(1)}%</span>`
+      : '—';
+      
     const logDate = row.timestamp ? row.timestamp.split(' ')[0] : '—';
     const evalDate = row.evaluation_date || '—';
     
@@ -862,6 +879,7 @@ function renderLedgerTable() {
         <td style="font-family: var(--font-mono); font-weight: 500; color: var(--accent);">$${fmtK(row.premium)}</td>
         <td style="font-family: var(--font-mono);">$${fmt(row.underlier_price)}</td>
         <td style="font-family: var(--font-mono);">${evalDate}</td>
+        <td style="font-family: var(--font-mono);">${predP50El}</td>
         <td style="font-family: var(--font-mono);">${retEl}</td>
         <td>${outcomeEl}</td>
       </tr>
@@ -877,7 +895,7 @@ function renderLedgerTable() {
       tr.classList.add('active-row');
       
       const idx = parseInt(tr.dataset.idx);
-      const trade = state.mlTrades[idx];
+      const trade = filteredTrades[idx];
       if (trade) {
         loadTradeIntoPredictor(trade, 'LEDGER');
       }
@@ -970,11 +988,20 @@ function renderFeatureImportances(list) {
   wrapper.innerHTML = rows.join('');
 }
 
+// Helper to map returns to a percentage for the horizontal range bar [-30%, +30%]
+function mapReturnToPercent(ret) {
+  const minRet = -0.30;
+  const maxRet = 0.30;
+  const pct = ((ret - minRet) / (maxRet - minRet)) * 100;
+  return Math.min(100, Math.max(0, pct));
+}
+
 // ── Run Manual Prediction / Inference ────────────────────────
 async function runManualInference(e) {
   e.preventDefault();
   
   const data = {
+    ticker: state.activeTicker || 'SPY',
     underlierPrice: parseFloat($('inf-underlier').value),
     strike: parseFloat($('inf-strike').value),
     optionType: $('inf-type').value,
@@ -996,18 +1023,17 @@ async function runManualInference(e) {
     });
     
     const res = await r.json();
-    const prob = res.probability;
-    const modelType = res.model_type;
     
-    const pctStr = (prob * 100).toFixed(1) + '%';
+    // 1. Success Probability
+    const pSuccess = res.p_success;
+    const pctStr = (pSuccess * 100).toFixed(1) + '%';
     const pctEl = $('prediction-percentage');
     pctEl.textContent = pctStr;
     
-    // Dynamically color score based on classification strength
-    if (prob >= 0.70) {
+    if (pSuccess >= 0.70) {
       pctEl.style.color = '#8FA382'; // Bull green/sage glow
       pctEl.style.textShadow = '0 0 6px rgba(143, 163, 130, 0.4)';
-    } else if (prob <= 0.40) {
+    } else if (pSuccess <= 0.40) {
       pctEl.style.color = 'var(--put)'; // Bear coral red glow
       pctEl.style.textShadow = '0 0 6px rgba(191, 90, 90, 0.4)';
     } else {
@@ -1015,7 +1041,101 @@ async function runManualInference(e) {
       pctEl.style.textShadow = '0 0 6px rgba(212, 175, 55, 0.4)';
     }
     
+    // 2. Model Engine Badge
+    const modelType = res.model_type || 'quantile_regression';
     $('model-type-badge').textContent = modelType.toUpperCase().replace('_', ' ');
+    
+    // 3. Recommended Strategy
+    const strat = res.strategy;
+    const conf = res.strategy_confidence;
+    const stratEl = $('strategy-badge');
+    stratEl.textContent = `${strat.replace('_', ' ')} — ${conf}%`;
+    
+    let stratBg = 'rgba(255, 255, 255, 0.05)';
+    let stratBorder = 'var(--border)';
+    let stratColor = 'var(--text-muted)';
+    
+    if (strat === 'VOL_EXPANSION') {
+      stratBg = 'rgba(217, 70, 239, 0.15)';
+      stratBorder = '#d946ef';
+      stratColor = '#f5d0fe';
+    } else if (strat === 'SIDEWAYS') {
+      stratBg = 'rgba(6, 182, 212, 0.15)';
+      stratBorder = '#06b6d4';
+      stratColor = '#cffafe';
+    } else if (strat === 'BULLISH_BREAKOUT') {
+      stratBg = 'rgba(16, 185, 129, 0.15)';
+      stratBorder = '#10b981';
+      stratColor = '#d1fae5';
+    } else if (strat === 'BEARISH_BREAKDOWN') {
+      stratBg = 'rgba(244, 63, 94, 0.15)';
+      stratBorder = '#f43f5e';
+      stratColor = '#ffe4e6';
+    }
+    
+    stratEl.style.background = stratBg;
+    stratEl.style.borderColor = stratBorder;
+    stratEl.style.color = stratColor;
+    stratEl.style.boxShadow = `0 0 6px ${stratBorder}40`;
+    
+    // 4. Kelly Position Sizing
+    const cappedK = res.kelly_fraction;
+    const uncappedK = res.kelly_fraction_uncapped;
+    const cappedEl = $('kelly-capped-percentage');
+    cappedEl.textContent = (cappedK * 100).toFixed(1) + '%';
+    
+    const uncappedEl = $('kelly-uncapped-subtext');
+    uncappedEl.textContent = `Uncapped: ${(uncappedK * 100).toFixed(1)}%`;
+    uncappedEl.title = `Model suggested uncapped sizing: ${(uncappedK * 100).toFixed(1)}%`;
+    
+    // 5. Quantile Range Bar
+    const p10 = res.quantiles.p10;
+    const p50 = res.quantiles.p50;
+    const p90 = res.quantiles.p90;
+    
+    $('val-p10').textContent = (p10 * 100).toFixed(1) + '%';
+    $('val-p50').textContent = (p50 * 100).toFixed(1) + '%';
+    $('val-p90').textContent = (p90 * 100).toFixed(1) + '%';
+    
+    const p10Pct = mapReturnToPercent(p10);
+    const p50Pct = mapReturnToPercent(p50);
+    const p90Pct = mapReturnToPercent(p90);
+    
+    const fillEl = $('quantile-fill-bar');
+    fillEl.style.left = p10Pct + '%';
+    fillEl.style.width = Math.max(0, p90Pct - p10Pct) + '%';
+    
+    const tickEl = $('quantile-median-tick');
+    tickEl.style.left = p50Pct + '%';
+    
+    // 6. Surface the small badge inline in the active row of Unusual Activity Registry (scanner table)
+    const activeRow = document.querySelector('#scanner-table tr.active-row');
+    if (activeRow) {
+      const tickerCell = activeRow.cells[0];
+      if (tickerCell) {
+        const oldBadge = tickerCell.querySelector('.inline-strategy-badge');
+        if (oldBadge) {
+          oldBadge.remove();
+        }
+        
+        const badgeSpan = document.createElement('span');
+        badgeSpan.className = 'inline-strategy-badge';
+        badgeSpan.textContent = strat.replace('_', ' ');
+        badgeSpan.style.display = 'block';
+        badgeSpan.style.marginTop = '4px';
+        badgeSpan.style.padding = '2px 6px';
+        badgeSpan.style.borderRadius = '3px';
+        badgeSpan.style.fontSize = '9px';
+        badgeSpan.style.fontWeight = 'bold';
+        badgeSpan.style.fontFamily = 'var(--font-mono)';
+        badgeSpan.style.textAlign = 'center';
+        badgeSpan.style.width = 'max-content';
+        badgeSpan.style.border = '1px solid ' + stratBorder;
+        badgeSpan.style.background = stratBg;
+        badgeSpan.style.color = stratColor;
+        tickerCell.appendChild(badgeSpan);
+      }
+    }
     
   } catch (e) {
     alert(`Prediction inference call failed: ${e.message}`);
@@ -1117,8 +1237,12 @@ function renderModelRunsChart() {
     return d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
   }).reverse();
   
+  const p10Loss = state.mlModelRuns.map(run => run.pinball_loss_p10).reverse();
+  const p25Loss = state.mlModelRuns.map(run => run.pinball_loss_p25).reverse();
+  const p50Loss = state.mlModelRuns.map(run => run.pinball_loss_p50).reverse();
+  const p75Loss = state.mlModelRuns.map(run => run.pinball_loss_p75).reverse();
+  const p90Loss = state.mlModelRuns.map(run => run.pinball_loss_p90).reverse();
   const rocData = state.mlModelRuns.map(run => run.test_roc_auc).reverse();
-  const accData = state.mlModelRuns.map(run => run.test_accuracy).reverse();
   
   if (runsChart) {
     runsChart.destroy();
@@ -1130,18 +1254,53 @@ function renderModelRunsChart() {
       labels: labels,
       datasets: [
         {
-          label: 'Test ROC AUC',
-          data: rocData,
-          borderColor: 'rgba(212, 175, 55, 0.9)',
+          label: 'P10 Pinball Loss',
+          data: p10Loss,
+          borderColor: 'rgba(244, 63, 94, 0.8)', // Coral/red
           backgroundColor: 'transparent',
-          tension: 0.1
+          tension: 0.15,
+          yAxisID: 'y'
         },
         {
-          label: 'Test Accuracy',
-          data: accData,
-          borderColor: 'rgba(143, 163, 130, 0.9)',
+          label: 'P25 Pinball Loss',
+          data: p25Loss,
+          borderColor: 'rgba(249, 115, 22, 0.8)', // Orange
           backgroundColor: 'transparent',
-          tension: 0.1
+          tension: 0.15,
+          yAxisID: 'y'
+        },
+        {
+          label: 'P50 (Median) Loss',
+          data: p50Loss,
+          borderColor: 'rgba(6, 182, 212, 0.8)', // Cyan
+          backgroundColor: 'transparent',
+          tension: 0.15,
+          yAxisID: 'y'
+        },
+        {
+          label: 'P75 Pinball Loss',
+          data: p75Loss,
+          borderColor: 'rgba(16, 185, 129, 0.8)', // Green
+          backgroundColor: 'transparent',
+          tension: 0.15,
+          yAxisID: 'y'
+        },
+        {
+          label: 'P90 Pinball Loss',
+          data: p90Loss,
+          borderColor: 'rgba(217, 70, 239, 0.8)', // Purple
+          backgroundColor: 'transparent',
+          tension: 0.15,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Test ROC AUC (RHS)',
+          data: rocData,
+          borderColor: 'rgba(212, 175, 55, 0.9)', // Gold
+          backgroundColor: 'transparent',
+          borderDash: [5, 5],
+          tension: 0.1,
+          yAxisID: 'y1'
         }
       ]
     },
@@ -1150,7 +1309,7 @@ function renderModelRunsChart() {
       maintainAspectRatio: false,
       plugins: {
         legend: {
-          labels: { color: 'rgba(255, 255, 255, 0.7)', font: { family: 'Share Tech Mono' } }
+          labels: { color: 'rgba(255, 255, 255, 0.7)', font: { family: 'Share Tech Mono', size: 9 } }
         }
       },
       scales: {
@@ -1159,8 +1318,28 @@ function renderModelRunsChart() {
           ticks: { color: 'rgba(255,255,255,0.4)', font: { family: 'Share Tech Mono' } }
         },
         y: {
+          position: 'left',
           grid: { color: 'rgba(255,255,255,0.05)' },
-          ticks: { color: 'rgba(255,255,255,0.4)', font: { family: 'Share Tech Mono' } }
+          ticks: { color: 'rgba(255,255,255,0.4)', font: { family: 'Share Tech Mono' } },
+          title: {
+            display: true,
+            text: 'Pinball Loss',
+            color: 'rgba(255,255,255,0.5)',
+            font: { family: 'Share Tech Mono', size: 10 }
+          }
+        },
+        y1: {
+          position: 'right',
+          grid: { drawOnChartArea: false },
+          min: 0,
+          max: 1.0,
+          ticks: { color: 'rgba(212, 175, 55, 0.6)', font: { family: 'Share Tech Mono' } },
+          title: {
+            display: true,
+            text: 'ROC AUC',
+            color: 'rgba(212, 175, 55, 0.6)',
+            font: { family: 'Share Tech Mono', size: 10 }
+          }
         }
       }
     }
@@ -1290,6 +1469,9 @@ function setupEventListeners() {
   $('inf-autocalc').addEventListener('change', () => {
     recalculateTheoreticalPremium();
   });
+
+  // Strategy filter for ledger table
+  $('filter-ledger-strategy')?.addEventListener('change', renderLedgerTable);
 
   // Hash Navigation Routing
   window.addEventListener('hashchange', handleRouting);

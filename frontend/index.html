@@ -150,16 +150,16 @@
   
       <!-- Swing Trading Interactive Filters Bar -->
       <div class="scanner-filters-bar">
-        <label class="filter-label">THRESHOLD DTE: <span id="val-min-dte" class="accent-gold">14</span>d
-          <input type="range" id="filter-min-dte" min="0" max="90" value="14" class="filter-slider" />
+        <label class="filter-label">THRESHOLD DTE: <span id="val-min-dte" class="accent-gold">7</span>d
+          <input type="range" id="filter-min-dte" min="0" max="90" value="7" class="filter-slider" />
         </label>
         
         <label class="filter-label">MIN NOTIONAL: $
-          <input type="number" id="filter-min-premium" value="50000" min="0" step="5000" class="filter-input filter-input-large" />
+          <input type="number" id="filter-min-premium" value="10000" min="0" step="1000" class="filter-input filter-input-large" />
         </label>
         
         <label class="filter-label">MIN CONTRACT OI:
-          <input type="number" id="filter-min-oi" value="100" min="0" step="50" class="filter-input filter-input-large" />
+          <input type="number" id="filter-min-oi" value="1" min="0" step="1" class="filter-input filter-input-large" />
         </label>
         
         <label class="filter-label checkbox-label">
@@ -412,14 +412,41 @@
         </form>
       </div>
       
-      <div class="prediction-result-panel" style="margin: 16px; padding: 16px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); display: flex; align-items: center; justify-content: space-between;">
-        <div>
-          <h4 style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px;">ESTIMATED PROBABILITY OF SUCCESS</h4>
-          <div id="prediction-target-profile" style="font-family: var(--font-mono); font-size: 10px; color: var(--accent); margin-top: 4px;">TARGET PROFILE: CUSTOM MANUAL PARAMETERS</div>
-          <p style="font-size: 12px; color: var(--text); margin-top: 4px;">Model Engine: <span id="model-type-badge" class="accent-gold" style="font-family: var(--font-mono); font-size: 10px;">HEURISTIC FALLBACK</span></p>
+      <div class="prediction-result-panel" style="margin: 16px; padding: 16px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; gap: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
+          <div>
+            <h4 style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px; text-transform: uppercase;">Estimated P(Success)</h4>
+            <div id="prediction-percentage" style="font-family: var(--font-mono); font-size: 36px; font-weight: 600; color: var(--accent); margin-top: 4px;">--%</div>
+            <div id="prediction-target-profile" style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-top: 4px;">TARGET PROFILE: CUSTOM MANUAL PARAMETERS</div>
+            <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Model Engine: <span id="model-type-badge" class="accent-gold" style="font-family: var(--font-mono); font-size: 10px;">HEURISTIC FALLBACK</span></p>
+          </div>
+          
+          <div style="display: flex; flex-direction: column; align-items: flex-end; text-align: right;">
+            <h4 style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px; text-transform: uppercase;">Kelly Optimal Size</h4>
+            <div id="kelly-capped-percentage" style="font-family: var(--font-mono); font-size: 36px; font-weight: 600; color: var(--buy); margin-top: 4px;">--%</div>
+            <div id="kelly-uncapped-subtext" style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-top: 4px;" title="Uncapped Kelly Optimal sizing based on continuous returns">Uncapped: --%</div>
+          </div>
         </div>
-        <div id="prediction-gauge-wrapper" style="text-align: right;">
-          <span id="prediction-percentage" style="font-family: var(--font-mono); font-size: 42px; font-weight: 600; line-height: 1; color: var(--accent);">--%</span>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; border-top: 1px solid var(--border); padding-top: 12px;">
+          <div>
+            <span style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted);">RECOMMENDED STRATEGY</span>
+            <div id="strategy-badge-container" style="margin-top: 4px;">
+              <span id="strategy-badge" style="display: inline-block; padding: 4px 8px; border-radius: 4px; font-family: var(--font-mono); font-size: 11px; font-weight: bold; border: 1px solid var(--border); background: rgba(255,255,255,0.05); color: var(--text-muted);">--</span>
+            </div>
+          </div>
+          
+          <div style="flex-grow: 1; max-width: 320px; margin-left: 0;">
+            <div style="display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">
+              <span>P10: <span id="val-p10">--%</span></span>
+              <span>Expected (P50): <span id="val-p50">--%</span></span>
+              <span>P90: <span id="val-p90">--%</span></span>
+            </div>
+            <div class="quantile-bar-track" style="height: 6px; background: rgba(255,255,255,0.07); border-radius: 3px; position: relative;">
+              <div id="quantile-fill-bar" style="position: absolute; height: 100%; background: linear-gradient(90deg, var(--sell) 0%, var(--buy) 100%); opacity: 0.5; border-radius: 3px; left: 0%; right: 100%;"></div>
+              <div id="quantile-median-tick" style="position: absolute; width: 4px; height: 12px; background: var(--accent); top: -3px; left: 50%; border-radius: 2px; box-shadow: 0 0 6px var(--accent);"></div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -546,8 +573,15 @@
           <h2 class="card-title">HISTORICAL EVALUATION LEDGER</h2>
           <span class="card-badge accent-gold">LEDGER</span>
         </div>
-        <div class="card-header-right">
-          <div class="loading-indicator" id="ledger-loading">
+        <div class="card-header-right" style="display: flex; align-items: center; gap: 12px;">
+          <select id="filter-ledger-strategy" class="filter-select" style="font-size: 11px; padding: 2px 6px; height: auto; min-width: 140px; margin-right: 8px;">
+            <option value="ALL">ALL STRATEGIES</option>
+            <option value="SIDEWAYS">SIDEWAYS</option>
+            <option value="BULLISH_BREAKOUT">BULLISH BREAKOUT</option>
+            <option value="BEARISH_BREAKDOWN">BEARISH BREAKDOWN</option>
+            <option value="VOL_EXPANSION">VOL EXPANSION</option>
+          </select>
+          <div class="loading-indicator" id="ledger-loading" style="margin-right: 0;">
             <span class="spinner"></span> RETRIEVING DATA VECTORS...
           </div>
         </div>
@@ -566,12 +600,13 @@
               <th>PREMIUM</th>
               <th>UNDERLIER START</th>
               <th>EVALUATION DATE</th>
+              <th>PRED P50</th>
               <th>OBSERVED RETURN</th>
               <th>OUTCOME STATUS</th>
             </tr>
           </thead>
           <tbody id="ledger-tbody">
-            <tr><td colspan="11" class="table-empty">[ INITIALIZING FEED... ]</td></tr>
+            <tr><td colspan="12" class="table-empty">[ INITIALIZING FEED... ]</td></tr>
           </tbody>
         </table>
       </div>
