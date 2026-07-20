@@ -207,7 +207,7 @@ function setLoading(id, active) {
 // ══════════════════════════════════════════════════════════════
 
 // ── WIDGET A: Unusual Options Scanner ───────────────────────
-async function fetchScanner(minVolOI = 2.0) {
+async function fetchScanner(minVolOI = 8.0) {
   setLoading('scanner-loading', true);
   try {
     const r = await fetch(`${API_BASE}/api/scanner?min_vol_oi=${minVolOI}`);
@@ -1686,15 +1686,15 @@ async function runBacktestSimulation(e) {
   
   const mode = $('bt-mode').value;
   const initialCapital = parseFloat($('bt-initial-capital').value) || 100000;
-  const probThreshold = (parseFloat($('bt-prob-threshold').value) || 60) / 100.0;
+  const probThreshold = (parseFloat($('bt-prob-threshold').value) || 65) / 100.0;
   const maxRisk = (parseFloat($('bt-max-risk').value) || 2.0) / 100.0;
   const trainWindow = parseInt($('bt-train-window').value) || 50;
   const testIncrement = parseInt($('bt-test-increment').value) || 10;
   const isSweep = $('bt-sweep-enable').checked;
   const strategyType = $('bt-strategy-type')?.value || 'standard';
-  const maxConcurrentTrades = parseInt($('bt-max-concurrent')?.value) || 1;
+  const maxConcurrentTrades = parseInt($('bt-max-concurrent')?.value) || 3;
   const scanTime = $('bt-scan-time')?.value.trim() || '10:00:00';
-  const minKellyFraction = (parseFloat($('bt-min-kelly-fraction')?.value) || 0) / 100.0;
+  const minKellyFraction = (parseFloat($('bt-min-kelly-fraction')?.value) || 1.0) / 100.0;
   const hardStopLoss = parseFloat($('bt-hard-stop-loss')?.value) || 0.0;
   const lookbackDaysRaw = parseInt($('bt-lookback-days')?.value) || 0;
   const lookbackDays = lookbackDaysRaw > 0 ? lookbackDaysRaw : null;  // 0 means "all data"
@@ -1804,8 +1804,8 @@ async function runBacktestSimulation(e) {
 
       $('card-backtest-heatmap').style.display = 'block';
     } else {
-      const kellyMultiplier = parseFloat($('bt-kelly-multiplier').value) || 0.5;
-      const stopLambda = parseFloat($('bt-stop-lambda').value) || 1.2;
+      const kellyMultiplier = parseFloat($('bt-kelly-multiplier').value) || 0.20;
+      const stopLambda = parseFloat($('bt-stop-lambda').value) || 1.0;
 
       const reqBody = {
         mode: mode,

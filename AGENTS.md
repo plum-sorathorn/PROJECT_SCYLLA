@@ -122,6 +122,3 @@ Rules:
 - Exception: once graphify has pointed you to specific files, reading their full contents directly is correct and expected -- the rule only governs how you locate code, not whether you read it once found.
 - The graphify CLI is already installed and available directly on PATH. NEVER run it via npx, npm exec, or pip -- always call it as a plain 'graphify <command>' shell command.
 - After modifying code, run graphify update . to keep the graph current (AST-only, no API cost).
-- [README.md](README.md) — Project overview and quick start
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Deployment instructions
-- [GEMINI.md](GEMINI.md) — Gemini-specific project context

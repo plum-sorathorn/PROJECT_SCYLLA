@@ -268,7 +268,7 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
 @router.get("/unusual-options")
 def get_unusual_options(
     tickers: str = Query(default=",".join(SCAN_TICKERS), description="Comma-separated ticker list"),
-    min_vol_oi: float = Query(default=2.0, description="Minimum Vol/OI ratio filter"),
+    min_vol_oi: float = Query(default=8.0, description="Minimum Vol/OI ratio filter"),
     limit: int = Query(default=100, description="Max rows returned"),
 ):
     """
@@ -282,7 +282,7 @@ def get_unusual_options(
 @router.get("/scanner")
 def get_scanner(
     tickers: str = Query(default=",".join(SCAN_TICKERS), description="Comma-separated ticker list"),
-    min_vol_oi: float = Query(default=2.0, description="Minimum Vol/OI ratio filter"),
+    min_vol_oi: float = Query(default=8.0, description="Minimum Vol/OI ratio filter"),
     limit: int = Query(default=100, description="Max rows returned"),
     background_tasks: BackgroundTasks = None,
 ):

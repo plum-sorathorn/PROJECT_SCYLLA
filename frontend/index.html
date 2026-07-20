@@ -560,13 +560,13 @@
             <!-- Min Prob Threshold -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN SUCCESS PROBABILITY (%)</label>
-              <input type="number" id="bt-prob-threshold" value="60" min="2" max="98" step="1" class="filter-input" />
+              <input type="number" id="bt-prob-threshold" value="65" min="2" max="98" step="1" class="filter-input" />
             </div>
 
             <!-- Min Kelly Fraction -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN KELLY ALLOCATION (%)</label>
-              <input type="number" id="bt-min-kelly-fraction" value="2" min="0" max="25" step="1" class="filter-input" />
+              <input type="number" id="bt-min-kelly-fraction" value="1.0" min="0" max="50" step="0.5" class="filter-input" />
             </div>
 
             <!-- Hard Stop Loss -->
@@ -621,7 +621,7 @@
               </div>
               <!-- Single Input -->
               <div id="kelly-single-input">
-                <input type="range" id="bt-kelly-multiplier" min="0.1" max="1.0" value="0.5" step="0.05" class="filter-slider" />
+                <input type="range" id="bt-kelly-multiplier" min="0.05" max="1.0" value="0.20" step="0.05" class="filter-slider" />
               </div>
               <!-- Sweep Inputs -->
               <div id="kelly-sweep-inputs" style="display: none; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
@@ -648,7 +648,7 @@
               </div>
               <!-- Single Input -->
               <div id="stop-single-input">
-                <input type="range" id="bt-stop-lambda" min="0.5" max="3.0" value="1.2" step="0.1" class="filter-slider" />
+                <input type="range" id="bt-stop-lambda" min="0.5" max="3.0" value="1.0" step="0.1" class="filter-slider" />
               </div>
               <!-- Sweep Inputs -->
               <div id="stop-sweep-inputs" style="display: none; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">

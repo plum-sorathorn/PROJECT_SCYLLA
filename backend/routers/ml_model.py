@@ -1395,12 +1395,6 @@ def api_backtest(req: BacktestRequestSchema):
     df_real = get_real_trades(conn, labeled=1)
     conn.close()
 
-    # Apply lookback_days filter: restrict to trades within the last N calendar days of the dataset
-    if req.lookback_days is not None and req.lookback_days > 0 and not df_real.empty:
-        max_date = pd.to_datetime(df_real['timestamp']).max()
-        cutoff_date = (max_date - pd.Timedelta(days=req.lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
-        df_real = df_real[df_real['timestamp'] >= cutoff_date].reset_index(drop=True)
-
     N = len(df_real)
 
     if req.mode == "walkforward":
@@ -1414,9 +1408,24 @@ def api_backtest(req: BacktestRequestSchema):
                 detail=f"Insufficient real trade volume for walk-forward. Required: at least {train_window + increment} labeled trades, but current count is {N}."
             )
 
+        import joblib
+        import os
+        cache_file = os.path.join(os.path.dirname(__file__), "..", "cache_predictions_walkforward.pkl")
+        cache_key = f"{train_window}_{increment}_{N}_{profit_threshold}"
+        
         predictions = []
+        predictions_loaded = False
+        if os.path.exists(cache_file):
+            try:
+                cached_data = joblib.load(cache_file)
+                if cached_data.get("key") == cache_key:
+                    predictions = cached_data["predictions"]
+                    predictions_loaded = True
+            except Exception:
+                pass
+                
         T = train_window
-        while T < N:
+        while T < N and not predictions_loaded:
             df_train = df_real.iloc[0:T]
             test_end = min(T + increment, N)
             df_test = df_real.iloc[T:test_end]
@@ -1505,6 +1514,15 @@ def api_backtest(req: BacktestRequestSchema):
 
             T += increment
 
+        if not predictions_loaded:
+            try:
+                import joblib
+                import os
+                cache_file = os.path.join(os.path.dirname(__file__), "..", "cache_predictions_walkforward.pkl")
+                joblib.dump({"key": cache_key, "predictions": predictions}, cache_file)
+            except Exception:
+                pass
+
         in_sample_warning = False
 
     elif req.mode == "direct_dev":
@@ -1572,6 +1590,14 @@ def api_backtest(req: BacktestRequestSchema):
     scan_time = req.scan_time or "10:00:00"
     min_kelly_fraction = req.min_kelly_fraction or 0.0
     hard_stop_loss = (req.hard_stop_loss or 0.0) / 100.0
+
+    # Apply lookback_days filter on pre-computed predictions
+    if req.lookback_days is not None and req.lookback_days > 0 and predictions:
+        max_ts = max(p["row"]["timestamp"] for p in predictions)
+        max_dt = datetime.datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S")
+        cutoff_dt = max_dt - datetime.timedelta(days=req.lookback_days)
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+        predictions = [p for p in predictions if p["row"]["timestamp"] >= cutoff_str]
 
     # Date parsing
     for p in predictions:
