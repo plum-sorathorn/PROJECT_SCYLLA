@@ -49,6 +49,9 @@ def fetch_option_chain(ticker: str) -> pd.DataFrame:
             except Exception:
                 continue
 
+        if not selected_exps and expirations:
+            selected_exps = list(expirations[:4])
+
         # Cap at maximum of 6 expirations
         selected_exps = selected_exps[:6]
 
@@ -155,6 +158,10 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
         df["openInterest"] = pd.to_numeric(df["openInterest"], errors="coerce").fillna(0)
         df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce").fillna(0)
 
+        # Off-hours fallback: if total volume across chain is 0, use openInterest as synthetic volume for scanning
+        if (df["volume"] > 0).sum() == 0 and (df["openInterest"] > 0).sum() > 0:
+            df["volume"] = df["openInterest"]
+
         df = df[df["volume"] > 0]
         df["volOiRatio"] = df.apply(
             lambda r: round(r["volume"] / max(r["openInterest"], 1), 2),
@@ -166,6 +173,12 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
         sma_cache[ticker] = sma_flags
         em = compute_expected_move(ticker)
         em_cache[ticker] = em
+
+        trend_alignment = "NEUTRAL"
+        if sma_flags.get("above50dSMA") and sma_flags.get("above200dSMA"):
+            trend_alignment = "BULL_ALIGNED"
+        elif not sma_flags.get("above50dSMA") and not sma_flags.get("above200dSMA"):
+            trend_alignment = "BEAR_ALIGNED"
 
         for _, row in df.iterrows():
             last_trade_date_str = None
@@ -239,6 +252,7 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
                 "underlierPrice": float(row["underlierPrice"]),
                 "above50dSMA": sma_flags["above50dSMA"],
                 "above200dSMA": sma_flags["above200dSMA"],
+                "trendAlignment": trend_alignment,
                 "expectedMove": em,
                 "lastTradeDate": last_trade_date_str,
                 "side": side,

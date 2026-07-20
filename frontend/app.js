@@ -72,8 +72,8 @@ function showView(viewName) {
   if (viewName === 'dashboard') {
     if (dashboardView) dashboardView.style.display = 'block';
 
-    titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Dashboard</span>';
-    subEl.textContent = 'OPEN POSITIONS & TRADE MONITORING — REAL-TIME PROBABILITY ANALYSIS';
+    titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Live Signals</span>';
+    subEl.textContent = 'LIVE SCANNER FLOW & ML SIGNAL ANALYSIS — REAL-TIME OPPORTUNITY RANKING';
 
     if (!state.dashboardLoaded) {
       refreshDashboard();
@@ -1191,8 +1191,11 @@ async function refreshDashboard() {
 async function fetchOpenTrades() {
   setLoading('dashboard-loading', true);
   try {
-    const probThreshold = (parseFloat($('bt-prob-threshold')?.value) || 60) / 100.0;
-    const minKellyFraction = (parseFloat($('bt-min-kelly-fraction')?.value) || 0) / 100.0;
+    const dashProbEl = $('dash-prob-threshold');
+    const dashKellyEl = $('dash-min-kelly');
+    
+    const probThreshold = (dashProbEl && dashProbEl.value !== '' ? parseFloat(dashProbEl.value) : (parseFloat($('bt-prob-threshold')?.value) || 0)) / 100.0;
+    const minKellyFraction = (dashKellyEl && dashKellyEl.value !== '' ? parseFloat(dashKellyEl.value) : (parseFloat($('bt-min-kelly-fraction')?.value) || 0)) / 100.0;
     
     const r = await fetch(`${API_BASE}/api/ml/open-trades?prob_threshold=${probThreshold}&min_kelly_fraction=${minKellyFraction}`);
     const json = await r.json();
@@ -1523,6 +1526,8 @@ function setupEventListeners() {
   $('dash-filter-ticker')?.addEventListener('input', renderOpenTradesTable);
   $('dash-filter-strategy')?.addEventListener('change', renderOpenTradesTable);
   $('dash-sort-by')?.addEventListener('change', renderOpenTradesTable);
+  $('dash-prob-threshold')?.addEventListener('change', fetchOpenTrades);
+  $('dash-min-kelly')?.addEventListener('change', fetchOpenTrades);
 }
 
 // ── Boot Sequence ────────────────────────────────────────────

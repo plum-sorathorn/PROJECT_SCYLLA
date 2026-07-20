@@ -44,13 +44,14 @@
   --divider-subtle:          0.5px solid #f0f0f0; /* Thin row divider */
 
   /* Fonts */
-  --font-sans:               -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
-  --font-mono:               'Courier New', 'Monaco', monospace;
+  --font-sans:               'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+  --font-mono:               'Share Tech Mono', 'Courier New', 'Monaco', monospace;
 
   /* Layout / Sizes */
   --sidebar-width:           220px;
   --radius-card:             10px;
   --radius-control:          6px;
+  --shadow-hover:            0 6px 20px rgba(0, 0, 0, 0.05);
   
   /* Transitions */
   --transition-fast:         150ms ease-out;
@@ -352,8 +353,8 @@ h1, h2, h3, h4, h5, h6 {
 .summary-strip {
   display: flex;
   gap: 1px;
-  background: #e0e0e0;
-  border-bottom: var(--border-default);
+  background: var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   flex-wrap: wrap;
 }
 
@@ -362,26 +363,28 @@ h1, h2, h3, h4, h5, h6 {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 12px;
+  padding: 16px 12px;
   background: var(--bg-card);
-  gap: 4px;
-  transition: background var(--transition-fast);
+  gap: 6px;
+  transition: background var(--transition-fast), transform var(--transition-fast);
 }
 .summary-tile:hover {
   background: #fafafa;
+  transform: translateY(-1px);
 }
 
 .tile-label {
   font-family: var(--font-sans);
   font-size: 11px;
+  font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.8px;
 }
 
 .tile-value {
   font-family: var(--font-mono);
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 500;
   color: var(--text-primary);
 }
@@ -419,6 +422,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .card:hover {
+  transform: translateY(-2px);
   box-shadow: var(--shadow-hover);
   border-color: var(--border-strong);
 }
@@ -555,6 +559,18 @@ h1, h2, h3, h4, h5, h6 {
 }
 .filter-select:focus {
   border-color: var(--color-accent);
+}
+
+.dashboard-filter {
+  font-size: 11px;
+  padding: 2px 6px;
+  height: 26px;
+  min-height: 26px;
+  min-width: 140px;
+}
+input.dashboard-filter {
+  width: 120px;
+  min-width: auto;
 }
 
 /* Buttons */
@@ -824,6 +840,12 @@ h1, h2, h3, h4, h5, h6 {
 }
 .loading-indicator.active {
   display: flex;
+  animation: fadeIn var(--transition-medium) forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-5px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .spinner {
@@ -1348,11 +1370,6 @@ h1, h2, h3, h4, h5, h6 {
   height: 100%;
 }
 
-/* Core Dot */
-.iris-core {
-  animation: corePulse 2s ease-in-out infinite;
-}
-
 /* Nodes */
 .node {
   animation: nodeGlow 2s ease-in-out infinite alternate;
@@ -1380,6 +1397,15 @@ h1, h2, h3, h4, h5, h6 {
   animation: ringSpin 6s linear infinite;
   transform-origin: center;
 }
+
+/* Orbital Dots */
+.orbital-dot {
+  transform-origin: center;
+  filter: drop-shadow(0 0 4px var(--color-accent)) drop-shadow(0 0 8px var(--color-accent));
+}
+.dot-1 { animation: ringSpin 3.2s linear infinite; }
+.dot-2 { animation: ringSpinReverse 5.7s linear infinite; }
+.dot-3 { animation: ringSpin 2.1s linear infinite; }
 
 /* Flare */
 .iris-flare {
@@ -1465,6 +1491,11 @@ h1, h2, h3, h4, h5, h6 {
 @keyframes ringSpin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
+}
+
+@keyframes ringSpinReverse {
+  0% { transform: rotate(360deg); }
+  100% { transform: rotate(0deg); }
 }
 
 @keyframes flarePulse {

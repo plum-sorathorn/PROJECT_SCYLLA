@@ -419,7 +419,7 @@ def api_get_open_trades(
         target_pct = float(settings.get("profit_threshold", "0.03"))
         
         from .unusual_options import scan_raw_options, SCAN_TICKERS
-        raw_options = scan_raw_options(",".join(SCAN_TICKERS), min_vol_oi=2.0, limit=100)
+        raw_options = scan_raw_options(",".join(SCAN_TICKERS), min_vol_oi=0.1, limit=100)
         df = pd.DataFrame(raw_options)
         
         if not df.empty:
@@ -482,7 +482,7 @@ def api_get_open_trades(
                         'dte': row['dte'],
                         'option_type': row['option_type'],
                         'side': row['side'],
-                        'trend_alignment': row['trend_alignment']
+                        'trend_alignment': row.get('trend_alignment', 'NEUTRAL') if hasattr(row, 'get') else getattr(row, 'trend_alignment', 'NEUTRAL')
                     }
                     
                     row_data['moneyness'] = (row['strike'] - row['underlier_price']) / row['underlier_price']
@@ -855,7 +855,7 @@ def api_train_model():
         
     try:
         conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query("SELECT * FROM options_trades WHERE labeled = 1", conn)
+        df = pd.read_sql_query("SELECT * FROM options_trades WHERE labeled = 1 AND is_synthetic = 1", conn)
         conn.close()
         
         # If there's too little data, we add some dummy historical data to allow bootstrap training
@@ -929,7 +929,7 @@ def api_train_model():
             conn.commit()
             
             # Refetch data
-            df = pd.read_sql_query("SELECT * FROM options_trades WHERE labeled = 1", conn)
+            df = pd.read_sql_query("SELECT * FROM options_trades WHERE labeled = 1 AND is_synthetic = 1", conn)
             conn.close()
 
         # ── Compute advanced features ─────────────────────────
