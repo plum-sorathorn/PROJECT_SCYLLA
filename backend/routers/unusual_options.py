@@ -15,11 +15,13 @@ logger = logging.getLogger("scylla.unusual_options")
 
 router = APIRouter()
 
-# Curated list of high-liquidity tickers for whale scanning
+# Curated list of top 50 market cap stocks (excluding indices) for whale scanning
 SCAN_TICKERS = [
-    "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "META",
-    "AMZN", "GOOGL", "NFLX", "BAC", "GS", "JPM", "XOM", "CVX",
-    "IWM", "DIA", "ARKK", "BABA"
+    "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AVGO", "TSLA", "WMT", "LLY",
+    "JPM", "UNH", "V", "XOM", "MA", "ORCL", "COST", "HD", "PG", "NFLX",
+    "BAC", "JNJ", "ABBV", "CRM", "CVX", "AMD", "KO", "PEP", "MRK", "TMO",
+    "PLTR", "DIS", "WFC", "ABT", "CSCO", "GE", "ACN", "IBM", "MCD", "NOW",
+    "INTU", "QCOM", "TXN", "GS", "AMAT", "CAT", "MS", "AMGN", "INTC", "UBER"
 ]
 
 
@@ -36,7 +38,7 @@ def fetch_option_chain(ticker: str) -> pd.DataFrame:
             hist = tk.history(period="1d")
             spot = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
 
-        # Target expirations between 14 and 90 Days to Expiration (DTE), capping at a maximum of 6
+        # Target expirations between 0 and 90 Days to Expiration (DTE), capping at a maximum of 6
         import datetime
         today = datetime.date.today()
         selected_exps = []
@@ -44,7 +46,7 @@ def fetch_option_chain(ticker: str) -> pd.DataFrame:
             try:
                 exp_date = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
                 dte = (exp_date - today).days
-                if 14 <= dte <= 90:
+                if 0 <= dte <= 90:
                     selected_exps.append(exp_str)
             except Exception:
                 continue

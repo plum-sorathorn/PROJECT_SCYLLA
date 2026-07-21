@@ -7,6 +7,14 @@
 graphify-out/
 *.bat.bak
 
+# Databases & Model Weights / Cache
+*.db
+*.sqlite
+*.sqlite3
+*.pkl
+*.pickle
+
+
 # C++ vendored headers (fetched by scripts/fetch_vendors.ps1)
 cpp_core/third_party/
 

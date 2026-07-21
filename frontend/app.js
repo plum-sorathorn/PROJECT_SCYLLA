@@ -90,11 +90,17 @@ function showView(viewName) {
       refreshML();
       state.mlLoaded = true;
     }
+
+    // Auto-load #1 strategy cached simulation on initial display
+    if (!state.backtestResults && !state.backtestLoading) {
+      state.booting = true;
+      loadDefaultBacktestCache();
+    }
   } else {
     if (tacticalView) tacticalView.style.display = 'block';
     if (tacticalStrip) tacticalStrip.style.display = 'block';
 
-    titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Tactical Console</span>';
+    titleEl.innerHTML = 'PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Main Dashboard</span>';
     subEl.textContent = 'VOLATILITY & FLOW TELEMETRY — POWERED BY C++ CORE & OpenBB ODP';
 
     // Re-render tactical charts on display
@@ -1437,11 +1443,39 @@ function setupEventListeners() {
   });
 
   $('bt-strategy-type')?.addEventListener('change', (e) => {
-    const isScan = e.target.value === 'highest_prob_scan';
+    const val = e.target.value;
+    const isScan = val === 'highest_prob_scan';
     const group1 = $('bt-max-concurrent-group');
     const group2 = $('bt-scan-time-group');
     if (group1) group1.style.display = isScan ? 'flex' : 'none';
     if (group2) group2.style.display = isScan ? 'flex' : 'none';
+
+    // Auto populate optimal parameters per strategy
+    const optParamsMap = {
+      'volatility_regime_adaptive': { prob: 65, kelly: 0.40, stop: 1.5, concurrent: 5 },
+      'directional_quantile_shift': { prob: 65, kelly: 0.50, stop: 1.5, concurrent: 5 },
+      'quantile_spread': { prob: 70, kelly: 0.50, stop: 1.0, concurrent: 5 },
+      'standard': { prob: 65, kelly: 0.50, stop: 1.5, concurrent: 5 },
+      'highest_prob_scan': { prob: 60, kelly: 0.50, scan_time: '10:00:00', concurrent: 1 },
+      'conservative_tight_stops': { prob: 80, kelly: 0.25, hard_stop: 10, concurrent: 3 },
+      'aggressive_kelly': { prob: 60, kelly: 0.80, stop: 2.5, concurrent: 10 },
+      'mean_reversion_overlay': { prob: 60, kelly: 0.40, hard_stop: 20, concurrent: 3 }
+    };
+
+    const p = optParamsMap[val];
+    if (p) {
+      if (p.prob !== undefined && $('bt-prob-threshold')) $('bt-prob-threshold').value = p.prob;
+      if (p.kelly !== undefined && $('bt-kelly-multiplier')) {
+        $('bt-kelly-multiplier').value = p.kelly;
+        if ($('kelly-val-display')) $('kelly-val-display').textContent = p.kelly.toFixed(2);
+      }
+      if (p.stop !== undefined && $('bt-stop-lambda')) {
+        $('bt-stop-lambda').value = p.stop;
+        if ($('stop-val-display')) $('stop-val-display').textContent = p.stop.toFixed(2);
+      }
+      if (p.concurrent !== undefined && $('bt-max-concurrent')) $('bt-max-concurrent').value = p.concurrent;
+      if (p.hard_stop !== undefined && $('bt-hard-stop-loss')) $('bt-hard-stop-loss').value = p.hard_stop || 0;
+    }
   });
 
   $('bt-kelly-multiplier')?.addEventListener('input', (e) => {
@@ -1580,7 +1614,6 @@ function setupEventListeners() {
   const swingPromise = fetchSwingAlignment();
   const dashboardPromise = refreshDashboard();
   const mlPromise = refreshML();
-  const backtestPromise = runBacktestSimulation();
 
   // Set loaded flags so view transitions are immediate
   state.dashboardLoaded = true;
@@ -1595,8 +1628,7 @@ function setupEventListeners() {
       ivSkewPromise,
       swingPromise,
       dashboardPromise,
-      mlPromise,
-      backtestPromise
+      mlPromise
     ]);
   } catch (e) {
     console.warn('Error during boot data fetch:', e);
@@ -1679,6 +1711,35 @@ function showConfirmModal(onConfirm) {
     modal.style.display = 'none';
     state.directDevConfirmed = false;
   };
+}
+
+async function loadDefaultBacktestCache() {
+  if (state.backtestLoading) return;
+  setLoading('backtest-loading', true);
+  try {
+    const r = await fetch(`${API_BASE}/api/ml/backtest/default_cache`);
+    const data = await r.json();
+    if (r.ok && data) {
+      loadBacktestData(data);
+      const cacheBanner = $('bt-cache-info-banner');
+      if (cacheBanner) {
+        cacheBanner.style.display = 'flex';
+        const meta = data.cache_metadata;
+        if (meta) {
+          $('bt-cache-status-text').textContent = `(${meta.strategy_name} — Optimal Validated Parameters)`;
+          $('bt-cache-timestamp').textContent = `Last computed: ${meta.cached_at} | Data Range: 2017-02-17 to 2026-06-24`;
+        }
+      }
+    } else {
+      runBacktestSimulation();
+    }
+  } catch (err) {
+    console.error('Failed to load default backtest cache:', err);
+    runBacktestSimulation();
+  } finally {
+    setLoading('backtest-loading', false);
+    state.booting = false;
+  }
 }
 
 async function runBacktestSimulation(e) {

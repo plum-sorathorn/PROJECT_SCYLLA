@@ -54,15 +54,18 @@ def classify_strategy(median: float, p10: float, p90: float, iqr_threshold: floa
         confidence = min(pct_iqr, pct_dir) * 100.0
         return strategy, round(min(100.0, max(0.0, confidence)), 2)
 
-def kelly_fraction(p_success: float, median: float, p10: float, p90: float) -> tuple[float, float]:
+def kelly_fraction(p_success: float, median: float, p10: float, p90: float, kelly_cap: float = 0.25) -> tuple[float, float]:
     """
     Compute Kelly criterion position sizing fraction.
     Returns: (capped_fraction, uncapped_fraction)
     """
-    b = (p90 - median) / max(median - p10, 1e-6)  # asymmetric payoff ratio proxy
+    denom = max(median - p10, 1e-6)
+    numer = max(p90 - median, 1e-6)
+    b = max(numer / denom, 0.01)  # asymmetric payoff ratio proxy bounded >= 0.01
     
-    # Kelly Formula: f* = (p * b - q) / b = (p * b - (1 - p)) / b
+    # Kelly Formula: f* = (p * b - (1 - p)) / b
     f_star = (p_success * b - (1.0 - p_success)) / b
     
-    capped = max(0.0, min(f_star, 0.25))
+    capped = max(0.0, min(f_star, kelly_cap))
     return float(capped), float(f_star)
+
