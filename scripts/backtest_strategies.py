@@ -14,22 +14,6 @@ def run_backtest(params):
 
 strategies = [
     {
-        "name": "highest_prob_scan",
-        "base_params": {
-            "mode": "walkforward",
-            "strategy_type": "highest_prob_scan",
-            "walkforward_train_window": 500,
-            "walkforward_test_increment": 100,
-            "initial_capital": 100000.0,
-            "max_concurrent_trades": 1
-        },
-        "grid": [
-            {"prob_threshold": 0.6, "kelly_multiplier": 0.5, "scan_time": "10:00:00"},
-            {"prob_threshold": 0.7, "kelly_multiplier": 0.5, "scan_time": "10:30:00"},
-            {"prob_threshold": 0.65, "kelly_multiplier": 0.25, "scan_time": "11:00:00"}
-        ]
-    },
-    {
         "name": "standard_portfolio",
         "base_params": {
             "mode": "walkforward",
@@ -43,23 +27,6 @@ strategies = [
             {"prob_threshold": 0.6, "kelly_multiplier": 0.3, "stop_lambda": 1.0},
             {"prob_threshold": 0.65, "kelly_multiplier": 0.5, "stop_lambda": 1.5},
             {"prob_threshold": 0.7, "kelly_multiplier": 0.2, "stop_lambda": 1.0}
-        ]
-    },
-    {
-        "name": "conservative_tight_stops",
-        "base_params": {
-            "mode": "walkforward",
-            "strategy_type": "standard",
-            "walkforward_train_window": 500,
-            "walkforward_test_increment": 100,
-            "initial_capital": 100000.0,
-            "max_concurrent_trades": 3,
-            "kelly_cap": 0.1
-        },
-        "grid": [
-            {"prob_threshold": 0.75, "kelly_multiplier": 0.2, "hard_stop_loss": 20.0},
-            {"prob_threshold": 0.8, "kelly_multiplier": 0.25, "hard_stop_loss": 10.0},
-            {"prob_threshold": 0.7, "kelly_multiplier": 0.15, "hard_stop_loss": 15.0}
         ]
     },
     {

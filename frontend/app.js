@@ -5,7 +5,9 @@
 
 'use strict';
 
-const API_BASE = 'http://127.0.0.1:6900';
+const API_BASE = (window.location.protocol && window.location.protocol.startsWith('http')) 
+  ? `${window.location.protocol}//${window.location.hostname || '127.0.0.1'}:6900`
+  : 'http://127.0.0.1:6900';
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -34,6 +36,8 @@ const state = {
   // Dashboard State
   dashboardOpenTrades: [],
   dashboardLoaded: false,
+  dashSortKey: 'timestamp',
+  dashSortDir: -1,
 
   // Backtester State
   backtestResults: null,
@@ -203,8 +207,21 @@ async function checkHealth() {
 // ── Loading helpers ──────────────────────────────────────────
 function setLoading(id, active) {
   const el = $(id);
-  if (!el) return;
-  el.classList.toggle('active', active);
+  if (el) el.classList.toggle('active', active);
+
+  if (id === 'backtest-loading') {
+    state.backtestLoading = !!active;
+    const btn = $('btn-run-backtest');
+    if (btn) {
+      btn.disabled = !!active;
+      btn.style.opacity = active ? '0.6' : '1';
+      btn.style.cursor = active ? 'not-allowed' : 'pointer';
+      btn.style.pointerEvents = active ? 'none' : 'auto';
+      btn.innerHTML = active 
+        ? '<span class="spinner" style="display:inline-block; width:12px; height:12px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; margin-right:8px;"></span> SIMULATING...' 
+        : 'RUN BACKTEST SIMULATION';
+    }
+  }
 }
 
 
@@ -216,7 +233,7 @@ function setLoading(id, active) {
 async function fetchScanner(minVolOI = 8.0) {
   setLoading('scanner-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/scanner?min_vol_oi=${minVolOI}`);
+    const r = await fetch(`${API_BASE}/api/scanner?min_vol_oi=${minVolOI}`, { signal: AbortSignal.timeout(25000) });
     const json = await r.json();
     state.scannerData = json.data || [];
     updateSummary(json.summary);
@@ -224,7 +241,13 @@ async function fetchScanner(minVolOI = 8.0) {
     updateExpectedMovePanel();
   } catch (e) {
     const tbody = $('scanner-tbody');
-    tbody.innerHTML = `<tr><td colspan="15" class="table-empty">[ ERROR: ENGINE OFFLINE — CONNECTION REFUSED AT ${API_BASE} ]</td></tr>`;
+    if (tbody) {
+      const isTimeout = e.name === 'AbortError';
+      const msg = isTimeout 
+        ? '[ DATA LOAD TIMED OUT — RETRYING SCANNER QUERY ]' 
+        : `[ SCANNER OFFLINE — ${e.message || 'Check Connection'} ]`;
+      tbody.innerHTML = `<tr><td colspan="15" class="table-empty">${msg}</td></tr>`;
+    }
     console.error('Scanner fetch error:', e);
   } finally {
     setLoading('scanner-loading', false);
@@ -414,7 +437,7 @@ function updateAssetWidgets(ticker) {
 async function fetchPCR() {
   setLoading('pcr-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/put-call-ratio`);
+    const r = await fetch(`${API_BASE}/api/put-call-ratio`, { signal: AbortSignal.timeout(20000) });
     const json = await r.json();
     state.pcrData = json.data || {};
     renderPCRChart();
@@ -473,7 +496,7 @@ function renderPCRChart() {
 async function fetchVolCon(ticker = 'SPY') {
   setLoading('volcon-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/volume-concentration?ticker=${ticker}`);
+    const r = await fetch(`${API_BASE}/api/volume-concentration?ticker=${ticker}`, { signal: AbortSignal.timeout(20000) });
     const json = await r.json();
     state.volConData = json.data || [];
     renderVolConChart();
@@ -525,7 +548,7 @@ function renderVolConChart() {
 async function fetchIVSkew(ticker = 'SPY') {
   setLoading('iv-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/iv-skew?ticker=${ticker}`);
+    const r = await fetch(`${API_BASE}/api/iv-skew?ticker=${ticker}`, { signal: AbortSignal.timeout(20000) });
     const json = await r.json();
     state.ivData = json;
     renderIVGauges();
@@ -1065,17 +1088,23 @@ function renderModelRunsChart() {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   
-  const labels = state.mlModelRuns.map(run => {
+  // Sort runs chronologically ascending by timestamp
+  const sortedRuns = [...state.mlModelRuns].sort((a, b) => 
+    new Date(a.timestamp || 0) - new Date(b.timestamp || 0)
+  );
+
+  const labels = sortedRuns.map(run => {
+    if (!run.timestamp) return '--';
     const d = new Date(run.timestamp);
-    return d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-  }).reverse();
+    return isNaN(d.getTime()) ? run.timestamp : d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  });
   
-  const p10Loss = state.mlModelRuns.map(run => run.pinball_loss_p10).reverse();
-  const p25Loss = state.mlModelRuns.map(run => run.pinball_loss_p25).reverse();
-  const p50Loss = state.mlModelRuns.map(run => run.pinball_loss_p50).reverse();
-  const p75Loss = state.mlModelRuns.map(run => run.pinball_loss_p75).reverse();
-  const p90Loss = state.mlModelRuns.map(run => run.pinball_loss_p90).reverse();
-  const rocData = state.mlModelRuns.map(run => run.test_roc_auc).reverse();
+  const p10Loss = sortedRuns.map(run => run.pinball_loss_p10);
+  const p25Loss = sortedRuns.map(run => run.pinball_loss_p25);
+  const p50Loss = sortedRuns.map(run => run.pinball_loss_p50);
+  const p75Loss = sortedRuns.map(run => run.pinball_loss_p75);
+  const p90Loss = sortedRuns.map(run => run.pinball_loss_p90);
+  const rocData = sortedRuns.map(run => run.test_roc_auc);
   
   if (runsChart) {
     runsChart.destroy();
@@ -1091,7 +1120,7 @@ function renderModelRunsChart() {
           data: p10Loss,
           borderColor: 'rgba(244, 63, 94, 0.8)', // Coral/red
           backgroundColor: 'transparent',
-          tension: 0.15,
+          tension: 0,
           yAxisID: 'y'
         },
         {
@@ -1099,7 +1128,7 @@ function renderModelRunsChart() {
           data: p25Loss,
           borderColor: 'rgba(249, 115, 22, 0.8)', // Orange
           backgroundColor: 'transparent',
-          tension: 0.15,
+          tension: 0,
           yAxisID: 'y'
         },
         {
@@ -1107,7 +1136,7 @@ function renderModelRunsChart() {
           data: p50Loss,
           borderColor: 'rgba(6, 182, 212, 0.8)', // Cyan
           backgroundColor: 'transparent',
-          tension: 0.15,
+          tension: 0,
           yAxisID: 'y'
         },
         {
@@ -1115,7 +1144,7 @@ function renderModelRunsChart() {
           data: p75Loss,
           borderColor: 'rgba(16, 185, 129, 0.8)', // Green
           backgroundColor: 'transparent',
-          tension: 0.15,
+          tension: 0,
           yAxisID: 'y'
         },
         {
@@ -1123,7 +1152,7 @@ function renderModelRunsChart() {
           data: p90Loss,
           borderColor: 'rgba(217, 70, 239, 0.8)', // Purple
           backgroundColor: 'transparent',
-          tension: 0.15,
+          tension: 0,
           yAxisID: 'y'
         },
         {
@@ -1132,7 +1161,7 @@ function renderModelRunsChart() {
           borderColor: 'rgba(0, 85, 102, 0.9)', // Teal
           backgroundColor: 'transparent',
           borderDash: [5, 5],
-          tension: 0.1,
+          tension: 0,
           yAxisID: 'y1'
         }
       ]
@@ -1203,7 +1232,7 @@ async function fetchOpenTrades() {
     const probThreshold = (dashProbEl && dashProbEl.value !== '' ? parseFloat(dashProbEl.value) : (parseFloat($('bt-prob-threshold')?.value) || 0)) / 100.0;
     const minKellyFraction = (dashKellyEl && dashKellyEl.value !== '' ? parseFloat(dashKellyEl.value) : (parseFloat($('bt-min-kelly-fraction')?.value) || 0)) / 100.0;
     
-    const r = await fetch(`${API_BASE}/api/ml/open-trades?prob_threshold=${probThreshold}&min_kelly_fraction=${minKellyFraction}`);
+    const r = await fetch(`${API_BASE}/api/ml/open-trades?prob_threshold=${probThreshold}&min_kelly_fraction=${minKellyFraction}`, { signal: AbortSignal.timeout(45000) });
     const json = await r.json();
     state.dashboardOpenTrades = json.data || [];
 
@@ -1250,7 +1279,8 @@ async function fetchOpenTrades() {
     renderOpenTradesTable();
   } catch (e) {
     const tbody = $('open-trades-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ ERROR: COULD NOT FETCH OPEN TRADES — ${e.message} ]</td></tr>`;
+    const msg = e.name === 'AbortError' ? 'Live Yahoo Finance scanner request timed out. Retrying recommended.' : e.message;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ WARNING: ${msg} ]</td></tr>`;
     console.error('Open trades fetch error:', e);
   } finally {
     setLoading('dashboard-loading', false);
@@ -1276,24 +1306,13 @@ function renderOpenTradesTable() {
   }
 
   // Sort
-  const sortBy = $('dash-sort-by')?.value || 'timestamp_desc';
-  switch (sortBy) {
-    case 'timestamp_asc':
-      trades.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-      break;
-    case 'p_success_desc':
-      trades.sort((a, b) => (b.p_success || 0) - (a.p_success || 0));
-      break;
-    case 'kelly_desc':
-      trades.sort((a, b) => (b.kelly_capped || 0) - (a.kelly_capped || 0));
-      break;
-    case 'dte_asc':
-      trades.sort((a, b) => (a.dte || 999) - (b.dte || 999));
-      break;
-    default: // timestamp_desc
-      trades.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-      break;
-  }
+  trades.sort((a, b) => {
+    let av = a[state.dashSortKey], bv = b[state.dashSortKey];
+    if (typeof av === 'string') av = av.toLowerCase(), bv = bv.toLowerCase();
+    if (av === undefined || av === null) return 1;
+    if (bv === undefined || bv === null) return -1;
+    return (av < bv ? -1 : av > bv ? 1 : 0) * state.dashSortDir;
+  });
 
   if (trades.length === 0) {
     tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ NO OPEN POSITIONS FOUND ]</td></tr>`;
@@ -1313,11 +1332,19 @@ function renderOpenTradesTable() {
     const pClass = row.p_success >= 0.70 ? 'accent-call' : (row.p_success <= 0.40 ? 'accent-coral' : '');
     const kellyStr = row.kelly_capped != null ? (row.kelly_capped * 100).toFixed(1) + '%' : '--';
     const stratStr = (row.predicted_strategy || '--').replace(/_/g, ' ');
-    const logDate = row.timestamp ? row.timestamp.split(' ')[0] : '--';
+    let logDate = '--';
+    if (row.timestamp) {
+      const parts = row.timestamp.split(' ');
+      if (parts.length >= 2) {
+        logDate = `${parts[0]} <span style="color: var(--text-muted); font-size: 10px;">${parts[1]}</span>`;
+      } else {
+        logDate = row.timestamp;
+      }
+    }
 
     return `
       <tr>
-        <td style="font-family: var(--font-mono);">${logDate}</td>
+        <td style="font-family: var(--font-mono); font-size: 11px; white-space: nowrap;">${logDate}</td>
         <td><strong>${row.ticker}</strong></td>
         <td>${row.expiration || '--'}</td>
         <td style="font-family: var(--font-mono);">$${fmt(row.strike)}</td>
@@ -1444,22 +1471,18 @@ function setupEventListeners() {
 
   $('bt-strategy-type')?.addEventListener('change', (e) => {
     const val = e.target.value;
-    const isScan = val === 'highest_prob_scan';
     const group1 = $('bt-max-concurrent-group');
     const group2 = $('bt-scan-time-group');
-    if (group1) group1.style.display = isScan ? 'flex' : 'none';
-    if (group2) group2.style.display = isScan ? 'flex' : 'none';
+    if (group1) group1.style.display = 'none';
+    if (group2) group2.style.display = 'none';
 
-    // Auto populate optimal parameters per strategy
+    // Auto populate optimal parameters per strategy from sweep_v2 optimal results (realistic 7% hard stop loss)
     const optParamsMap = {
-      'volatility_regime_adaptive': { prob: 65, kelly: 0.40, stop: 1.5, concurrent: 5 },
-      'directional_quantile_shift': { prob: 65, kelly: 0.50, stop: 1.5, concurrent: 5 },
-      'quantile_spread': { prob: 70, kelly: 0.50, stop: 1.0, concurrent: 5 },
-      'standard': { prob: 65, kelly: 0.50, stop: 1.5, concurrent: 5 },
-      'highest_prob_scan': { prob: 60, kelly: 0.50, scan_time: '10:00:00', concurrent: 1 },
-      'conservative_tight_stops': { prob: 80, kelly: 0.25, hard_stop: 10, concurrent: 3 },
-      'aggressive_kelly': { prob: 60, kelly: 0.80, stop: 2.5, concurrent: 10 },
-      'mean_reversion_overlay': { prob: 60, kelly: 0.40, hard_stop: 20, concurrent: 3 }
+      'volatility_regime_adaptive': { prob: 40, kelly: 0.55, kelly_cap: 20, stop: 2.0, hard_stop: 7, concurrent: 5, profit: 50, median_ret: 3 },
+      'quantile_spread': { prob: 36, kelly: 0.30, kelly_cap: 20, stop: 2.0, hard_stop: 7, concurrent: 5, max_spread: 4.0, profit: 50, median_ret: 3 },
+      'standard': { prob: 40, kelly: 0.55, kelly_cap: 20, stop: 2.0, hard_stop: 7, concurrent: 5, profit: 50, median_ret: 3 },
+      'directional_quantile_shift': { prob: 35, kelly: 0.50, kelly_cap: 20, hard_stop: 7, concurrent: 5, profit: 50, median_ret: 3 },
+      'aggressive_kelly': { prob: 40, kelly: 1.00, kelly_cap: 30, stop: 1.5, hard_stop: 7, concurrent: 10, profit: 10, median_ret: 3 }
     };
 
     const p = optParamsMap[val];
@@ -1475,6 +1498,10 @@ function setupEventListeners() {
       }
       if (p.concurrent !== undefined && $('bt-max-concurrent')) $('bt-max-concurrent').value = p.concurrent;
       if (p.hard_stop !== undefined && $('bt-hard-stop-loss')) $('bt-hard-stop-loss').value = p.hard_stop || 0;
+      if (p.kelly_cap !== undefined && $('bt-kelly-cap')) $('bt-kelly-cap').value = p.kelly_cap;
+      if (p.max_spread !== undefined && $('bt-max-quantile-spread')) $('bt-max-quantile-spread').value = p.max_spread;
+      if (p.profit !== undefined && $('bt-profit-threshold')) $('bt-profit-threshold').value = p.profit;
+      if (p.median_ret !== undefined && $('bt-min-median-return')) $('bt-min-median-return').value = p.median_ret;
     }
   });
 
@@ -1491,11 +1518,13 @@ function setupEventListeners() {
     const display = $('bt-lookback-display');
     if (display) {
       if (val === 0) {
-        display.textContent = 'ALL DATA';
+        display.textContent = 'ALL DATA (ENTIRE DATASET)';
       } else if (val >= 365) {
-        display.textContent = (val / 365).toFixed(1) + ' YEARS';
+        const yrs = (val / 365).toFixed(1);
+        display.textContent = `${yrs} ${yrs === '1.0' ? 'YEAR' : 'YEARS'} (${val} DAYS)`;
       } else {
-        display.textContent = val + ' DAYS';
+        const months = Math.round(val / 30);
+        display.textContent = `${val} DAYS (${months} ${months === 1 ? 'MONTH' : 'MONTHS'})`;
       }
     }
   });
@@ -1557,9 +1586,44 @@ function setupEventListeners() {
     });
   });
 
+  // Sorting for open positions / live signals table
+  document.querySelectorAll('#open-trades-table th[data-sort-dash]').forEach((th) => {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => {
+      const key = th.dataset.sortDash;
+      if (state.dashSortKey === key) {
+        state.dashSortDir *= -1;
+      } else {
+        state.dashSortKey = key;
+        state.dashSortDir = -1;
+      }
+      
+      document.querySelectorAll('#open-trades-table th').forEach((h) => {
+        h.classList.remove('active-sort');
+        const arrowSpan = h.querySelector('.sort-arrow');
+        if (arrowSpan) {
+          arrowSpan.textContent = '';
+        } else {
+          const textNode = Array.from(h.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+          if (textNode) textNode.textContent = textNode.textContent.replace(/[▲▼]/g, '').trim() + ' ';
+        }
+      });
+      
+      th.classList.add('active-sort');
+      const arrowSpan = th.querySelector('.sort-arrow');
+      if (arrowSpan) {
+        arrowSpan.textContent = state.dashSortDir === -1 ? '▼' : '▲';
+      } else {
+        const textNode = Array.from(th.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+        if (textNode) textNode.textContent = textNode.textContent.trim() + (state.dashSortDir === -1 ? ' ▼' : ' ▲');
+      }
+      
+      renderOpenTradesTable();
+    });
+  });
+
   $('dash-filter-ticker')?.addEventListener('input', renderOpenTradesTable);
   $('dash-filter-strategy')?.addEventListener('change', renderOpenTradesTable);
-  $('dash-sort-by')?.addEventListener('change', renderOpenTradesTable);
   $('dash-prob-threshold')?.addEventListener('change', fetchOpenTrades);
   $('dash-min-kelly')?.addEventListener('change', fetchOpenTrades);
 }
@@ -1583,6 +1647,31 @@ function setupEventListeners() {
 
   // Keep track of boot start time to enforce a minimum screen duration of 1.5s for cinematic feel
   const startTime = Date.now();
+
+  // Helper to safely dismiss startup loader overlay and re-enable interactive UI controls
+  let loaderDismissed = false;
+  const dismissLoader = () => {
+    if (loaderDismissed) return;
+    loaderDismissed = true;
+    const loader = $('startup-loader');
+    state.booting = false;
+    if (loader) {
+      loader.classList.add('fade-out');
+      setTimeout(() => {
+        loader.style.display = 'none';
+        document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
+          el.style.pointerEvents = 'auto';
+        });
+      }, 800);
+    } else {
+      document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
+        el.style.pointerEvents = 'auto';
+      });
+    }
+  };
+
+  // Hard safety timeout: Dismiss loader after 3.5 seconds max regardless of network latency
+  const hardTimeout = setTimeout(dismissLoader, 3500);
 
   // Step 1: Health Diagnostics
   if (statusEl) statusEl.textContent = 'RUNNING CORE SYSTEM DIAGNOSTICS...';
@@ -1614,51 +1703,37 @@ function setupEventListeners() {
   const swingPromise = fetchSwingAlignment();
   const dashboardPromise = refreshDashboard();
   const mlPromise = refreshML();
+  const backtestPromise = loadDefaultBacktestCache();
 
   // Set loaded flags so view transitions are immediate
   state.dashboardLoaded = true;
   state.mlLoaded = true;
 
-  // Await ALL of them to complete or handle failures gracefully
+  // Await ALL boot requests to finish loading before dismissing the loading screen
   try {
-    await Promise.all([
+    await Promise.allSettled([
       scannerPromise,
       pcrPromise,
       volConPromise,
       ivSkewPromise,
       swingPromise,
       dashboardPromise,
-      mlPromise
+      mlPromise,
+      backtestPromise
     ]);
   } catch (e) {
     console.warn('Error during boot data fetch:', e);
   }
 
-  // Step 4: Ensure the loading animation stays visible for at least 1.5 seconds to prevent flashing
+  // Ensure the loading animation stays visible for smooth presentation
   const elapsed = Date.now() - startTime;
-  const minDuration = 1500;
+  const minDuration = 1200;
   if (elapsed < minDuration) {
     await new Promise(resolve => setTimeout(resolve, minDuration - elapsed));
   }
 
-  // Step 5: Transition out the loading overlay (Shutter Blur & Fade-out)
-  const loader = $('startup-loader');
-  state.booting = false;
-  if (loader) {
-    loader.classList.add('fade-out');
-    // Once transition completes, hide completely and enable interactions
-    setTimeout(() => {
-      loader.style.display = 'none';
-      document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
-        el.style.pointerEvents = 'auto';
-      });
-    }, 800); // Matches the 800ms transition time
-  } else {
-    // Fallback if no loader element
-    document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
-      el.style.pointerEvents = 'auto';
-    });
-  }
+  // Step 4: Dismiss loading screen animation AFTER all data is loaded in full
+  dismissLoader();
 
   // Trigger background sync cycle (5 minutes)
   setInterval(refreshAll, 5 * 60 * 1000);
@@ -1715,35 +1790,19 @@ function showConfirmModal(onConfirm) {
 
 async function loadDefaultBacktestCache() {
   if (state.backtestLoading) return;
-  setLoading('backtest-loading', true);
+  state.booting = true;
   try {
-    const r = await fetch(`${API_BASE}/api/ml/backtest/default_cache`);
-    const data = await r.json();
-    if (r.ok && data) {
-      loadBacktestData(data);
-      const cacheBanner = $('bt-cache-info-banner');
-      if (cacheBanner) {
-        cacheBanner.style.display = 'flex';
-        const meta = data.cache_metadata;
-        if (meta) {
-          $('bt-cache-status-text').textContent = `(${meta.strategy_name} — Optimal Validated Parameters)`;
-          $('bt-cache-timestamp').textContent = `Last computed: ${meta.cached_at} | Data Range: 2017-02-17 to 2026-06-24`;
-        }
-      }
-    } else {
-      runBacktestSimulation();
-    }
+    await runBacktestSimulation();
   } catch (err) {
-    console.error('Failed to load default backtest cache:', err);
-    runBacktestSimulation();
+    console.error('Failed to run default startup backtest simulation:', err);
   } finally {
-    setLoading('backtest-loading', false);
     state.booting = false;
   }
 }
 
 async function runBacktestSimulation(e) {
   if (e) e.preventDefault();
+  if (state.backtestLoading) return;
   
   const mode = $('bt-mode').value;
   const initialCapital = parseFloat($('bt-initial-capital').value) || 100000;
@@ -1756,11 +1815,18 @@ async function runBacktestSimulation(e) {
   const maxConcurrentTrades = parseInt($('bt-max-concurrent')?.value) || 3;
   const scanTime = $('bt-scan-time')?.value.trim() || '10:00:00';
   const minKellyFraction = (parseFloat($('bt-min-kelly-fraction')?.value) || 1.0) / 100.0;
-  const hardStopLoss = parseFloat($('bt-hard-stop-loss')?.value) || 0.0;
+  const hardStopLossRaw = parseFloat($('bt-hard-stop-loss')?.value) || 0.0;
+  const hardStopLoss = hardStopLossRaw > 1.0 ? hardStopLossRaw / 100.0 : hardStopLossRaw;
   const lookbackDaysRaw = parseInt($('bt-lookback-days')?.value) || 0;
-  const lookbackDays = lookbackDaysRaw > 0 ? lookbackDaysRaw : null;  // 0 means "all data"
+  const lookbackDays = lookbackDaysRaw > 0 ? lookbackDaysRaw : null;
   const profitThresholdInput = parseFloat($('bt-profit-threshold')?.value);
-  const profitThreshold = !isNaN(profitThresholdInput) ? profitThresholdInput / 100.0 : null;
+  const profitThreshold = !isNaN(profitThresholdInput) ? (profitThresholdInput > 1.0 ? profitThresholdInput / 100.0 : profitThresholdInput) : null;
+  // Strategy-specific params — read from dedicated inputs if they exist, else use optimal defaults
+  const kellyCapRaw = parseFloat($('bt-kelly-cap')?.value) || 20.0;
+  const kellyCap = kellyCapRaw > 1.0 ? kellyCapRaw / 100.0 : kellyCapRaw;
+  const maxQuantileSpread = parseFloat($('bt-max-quantile-spread')?.value) || 4.0;
+  const minMedianReturnRaw = parseFloat($('bt-min-median-return')?.value) || 3.0;
+  const minMedianReturn = minMedianReturnRaw > 1.0 ? minMedianReturnRaw / 100.0 : minMedianReturnRaw;
 
   let confirmDirectDev = false;
   if (mode === 'direct_dev') {
@@ -1816,7 +1882,7 @@ async function runBacktestSimulation(e) {
             initial_capital: initialCapital,
             prob_threshold: probThreshold,
             kelly_multiplier: kMult,
-            kelly_cap: 0.25,
+            kelly_cap: kellyCap,
             stop_lambda: sLam,
             max_risk_pct_per_trade: maxRisk,
             walkforward_train_window: trainWindow,
@@ -1828,7 +1894,9 @@ async function runBacktestSimulation(e) {
             min_kelly_fraction: minKellyFraction,
             hard_stop_loss: hardStopLoss,
             lookback_days: lookbackDays,
-            profit_threshold: profitThreshold
+            profit_threshold: profitThreshold,
+            max_quantile_spread: maxQuantileSpread,
+            min_median_return: minMedianReturn
           };
           
           promises.push(
@@ -1863,17 +1931,18 @@ async function runBacktestSimulation(e) {
         loadBacktestData(sweepResults[0].data);
       }
 
-      $('card-backtest-heatmap').style.display = 'block';
+      const hmCard = $('card-backtest-heatmap');
+      if (hmCard) hmCard.style.display = 'block';
     } else {
-      const kellyMultiplier = parseFloat($('bt-kelly-multiplier').value) || 0.20;
-      const stopLambda = parseFloat($('bt-stop-lambda').value) || 1.0;
+      const kellyMultiplier = parseFloat($('bt-kelly-multiplier')?.value) || 0.20;
+      const stopLambda = parseFloat($('bt-stop-lambda')?.value) || 1.0;
 
       const reqBody = {
         mode: mode,
         initial_capital: initialCapital,
         prob_threshold: probThreshold,
         kelly_multiplier: kellyMultiplier,
-        kelly_cap: 0.25,
+        kelly_cap: kellyCap,
         stop_lambda: stopLambda,
         max_risk_pct_per_trade: maxRisk,
         walkforward_train_window: trainWindow,
@@ -1885,7 +1954,9 @@ async function runBacktestSimulation(e) {
         min_kelly_fraction: minKellyFraction,
         hard_stop_loss: hardStopLoss,
         lookback_days: lookbackDays,
-        profit_threshold: profitThreshold
+        profit_threshold: profitThreshold,
+        max_quantile_spread: maxQuantileSpread,
+        min_median_return: minMedianReturn
       };
 
       const r = await fetch(`${API_BASE}/api/ml/backtest`, {
@@ -1905,7 +1976,8 @@ async function runBacktestSimulation(e) {
       }
 
       state.backtestSweepResults = null;
-      $('card-backtest-heatmap').style.display = 'none';
+      const hmCard = $('card-backtest-heatmap');
+      if (hmCard) hmCard.style.display = 'none';
       loadBacktestData(data);
     }
   } catch (err) {
@@ -1921,46 +1993,77 @@ async function runBacktestSimulation(e) {
 }
 
 function loadBacktestData(data) {
+  if (!data) return;
   state.backtestResults = data;
   
   const warningBanner = $('bt-warning-banner');
-  if (data.in_sample_warning) {
-    warningBanner.style.display = 'flex';
-  } else {
-    warningBanner.style.display = 'none';
+  if (warningBanner) {
+    warningBanner.style.display = data.in_sample_warning ? 'flex' : 'none';
   }
 
-  $('bt-summary-badge').textContent = data.mode.toUpperCase();
-  $('bt-sum-pnl').textContent = data.summary.cumulative_pnl_pct.toFixed(2) + '%';
+  const badgeEl = $('bt-summary-badge');
+  if (badgeEl) badgeEl.textContent = (data.mode || 'walkforward').toUpperCase();
+
+  const pnlEl = $('bt-sum-pnl');
+  if (pnlEl && data.summary?.cumulative_pnl_pct !== undefined) {
+    pnlEl.textContent = data.summary.cumulative_pnl_pct.toFixed(2) + '%';
+  }
+
   const pnlUsdEl = $('bt-sum-pnl-usd');
-  if (pnlUsdEl && data.summary.cumulative_pnl_usd !== undefined) {
+  if (pnlUsdEl && data.summary?.cumulative_pnl_usd !== undefined) {
     pnlUsdEl.textContent = (data.summary.cumulative_pnl_usd >= 0 ? '+$' : '-$') + Math.abs(data.summary.cumulative_pnl_usd).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
     pnlUsdEl.className = 'tile-value ' + (data.summary.cumulative_pnl_usd >= 0 ? 'accent-call' : 'accent-coral');
   }
+
   const cagrEl = $('bt-sum-cagr');
-  if (cagrEl && data.summary.cagr_pct !== undefined) {
+  if (cagrEl && data.summary?.cagr_pct !== undefined) {
     cagrEl.textContent = data.summary.cagr_pct.toFixed(2) + '%';
   }
-  $('bt-sum-sharpe').textContent = data.summary.sharpe.toFixed(2);
-  $('bt-sum-sortino').textContent = data.summary.sortino.toFixed(2);
-  $('bt-sum-winloss').textContent = data.summary.win_loss_ratio.toFixed(2);
-  $('bt-sum-profitfactor').textContent = data.summary.profit_factor.toFixed(2);
-  $('bt-sum-maxdd').textContent = data.summary.max_drawdown_pct.toFixed(2) + '%';
-  $('bt-sum-triggered').textContent = `${data.summary.trades_triggered} / ${data.summary.trades_total_available}`;
+
+  const sharpeEl = $('bt-sum-sharpe');
+  if (sharpeEl && data.summary?.sharpe !== undefined) {
+    sharpeEl.textContent = data.summary.sharpe.toFixed(2);
+  }
+
+  const sortinoEl = $('bt-sum-sortino');
+  if (sortinoEl && data.summary?.sortino !== undefined) {
+    sortinoEl.textContent = data.summary.sortino.toFixed(2);
+  }
+
+  const winlossEl = $('bt-sum-winloss');
+  if (winlossEl && data.summary?.win_loss_ratio !== undefined) {
+    winlossEl.textContent = data.summary.win_loss_ratio.toFixed(2);
+  }
+
+  const profitfactorEl = $('bt-sum-profitfactor');
+  if (profitfactorEl && data.summary?.profit_factor !== undefined) {
+    profitfactorEl.textContent = data.summary.profit_factor.toFixed(2);
+  }
+
+  const maxddEl = $('bt-sum-maxdd');
+  if (maxddEl && data.summary?.max_drawdown_pct !== undefined) {
+    maxddEl.textContent = data.summary.max_drawdown_pct.toFixed(2) + '%';
+  }
+
+  const triggeredEl = $('bt-sum-triggered');
+  if (triggeredEl && data.summary) {
+    triggeredEl.textContent = `${data.summary.trades_triggered || 0} / ${data.summary.trades_total_available || 0}`;
+  }
 
   // Win rate (new field)
   const winRateEl = $('bt-sum-winrate');
-  if (winRateEl && data.summary.win_rate_pct !== undefined) {
+  if (winRateEl && data.summary?.win_rate_pct !== undefined) {
     winRateEl.textContent = data.summary.win_rate_pct.toFixed(1) + '%';
   }
 
   // Trade days info for Sharpe transparency
   const tradeDaysEl = $('bt-sum-tradedays');
-  if (tradeDaysEl && data.summary.trade_days_used_for_sharpe !== undefined) {
+  if (tradeDaysEl && data.summary?.trade_days_used_for_sharpe !== undefined) {
     tradeDaysEl.textContent = data.summary.trade_days_used_for_sharpe;
   }
   
-  $('card-backtest-summary').style.display = 'block';
+  const sumCard = $('card-backtest-summary');
+  if (sumCard) sumCard.style.display = 'block';
 
   // Display methodology warnings
   const warningsEl = $('bt-warnings-container');
@@ -1976,16 +2079,21 @@ function loadBacktestData(data) {
   }
 
   renderBacktestCharts(data);
-  $('card-backtest-chart-equity').style.display = 'block';
-  $('card-backtest-chart-drawdown').style.display = 'block';
+  const eqCard = $('card-backtest-chart-equity');
+  if (eqCard) eqCard.style.display = 'block';
+  const ddCard = $('card-backtest-chart-drawdown');
+  if (ddCard) ddCard.style.display = 'block';
 
   renderBacktestLedgerTable();
-  $('card-backtest-trades').style.display = 'block';
+  const tradesCard = $('card-backtest-trades');
+  if (tradesCard) tradesCard.style.display = 'block';
 }
 
 function renderBacktestCharts(data) {
   if (state.charts.btEquity) state.charts.btEquity.destroy();
   if (state.charts.btDrawdown) state.charts.btDrawdown.destroy();
+
+  if (!data || !data.equity_curve) return;
 
   const labels = data.equity_curve.map(pt => pt.date);
   const equityVals = data.equity_curve.map(pt => pt.equity);
@@ -1996,79 +2104,85 @@ function renderBacktestCharts(data) {
     return peak > 0 ? -((peak - eq) / peak * 100) : 0;
   });
 
-  const ctxEquity = $('chart-bt-equity').getContext('2d');
-  state.charts.btEquity = new Chart(ctxEquity, {
-    type: 'line',
-    data: {
-      labels: labels,
-      datasets: [{
-        label: 'Portfolio Equity ($)',
-        data: equityVals,
-        borderColor: '#005566',
-        backgroundColor: 'rgba(0, 85, 102, 0.05)',
-        borderWidth: 1.5,
-        tension: 0.1,
-        fill: true,
-        pointRadius: labels.length > 100 ? 0 : 2
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false }
+  const canvasEquity = $('chart-bt-equity');
+  if (canvasEquity) {
+    const ctxEquity = canvasEquity.getContext('2d');
+    state.charts.btEquity = new Chart(ctxEquity, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Portfolio Equity ($)',
+          data: equityVals,
+          borderColor: '#005566',
+          backgroundColor: 'rgba(0, 85, 102, 0.05)',
+          borderWidth: 1.5,
+          tension: 0.1,
+          fill: true,
+          pointRadius: labels.length > 100 ? 0 : 2
+        }]
       },
-      scales: {
-        x: {
-          grid: { color: '#f0f0f0' },
-          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } }
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
         },
-        y: {
-          grid: { color: '#f0f0f0' },
-          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 } }
-        }
-      }
-    }
-  });
-
-  const ctxDD = $('chart-bt-drawdown').getContext('2d');
-  state.charts.btDrawdown = new Chart(ctxDD, {
-    type: 'line',
-    data: {
-      labels: labels,
-      datasets: [{
-        label: 'Drawdown (%)',
-        data: ddVals,
-        borderColor: '#8b3a3a',
-        backgroundColor: 'rgba(139, 58, 58, 0.05)',
-        borderWidth: 1.5,
-        tension: 0.1,
-        fill: true,
-        pointRadius: 0
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false }
-      },
-      scales: {
-        x: {
-          grid: { color: '#f0f0f0' },
-          ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } }
-        },
-        y: {
-          grid: { color: '#f0f0f0' },
-          ticks: {
-            color: '#666666',
-            font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 },
-            callback: value => value.toFixed(1) + '%'
+        scales: {
+          x: {
+            grid: { color: '#f0f0f0' },
+            ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } }
+          },
+          y: {
+            grid: { color: '#f0f0f0' },
+            ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 } }
           }
         }
       }
-    }
-  });
+    });
+  }
+
+  const canvasDD = $('chart-bt-drawdown');
+  if (canvasDD) {
+    const ctxDD = canvasDD.getContext('2d');
+    state.charts.btDrawdown = new Chart(ctxDD, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Drawdown (%)',
+          data: ddVals,
+          borderColor: '#8b3a3a',
+          backgroundColor: 'rgba(139, 58, 58, 0.05)',
+          borderWidth: 1.5,
+          tension: 0.1,
+          fill: true,
+          pointRadius: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          x: {
+            grid: { color: '#f0f0f0' },
+            ticks: { color: '#666666', font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 9 } }
+          },
+          y: {
+            grid: { color: '#f0f0f0' },
+            ticks: {
+              color: '#666666',
+              font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10 },
+              callback: value => value.toFixed(1) + '%'
+            }
+          }
+        }
+      }
+    });
+  }
 }
 
 function renderSweepHeatmap() {
@@ -2157,12 +2271,12 @@ function renderBacktestLedgerTable() {
 
   let txs = [...state.backtestResults.transactions];
 
-  const tickerFilter = $('bt-filter-ticker').value.trim().toUpperCase();
+  const tickerFilter = ($('bt-filter-ticker')?.value || '').trim().toUpperCase();
   if (tickerFilter) {
     txs = txs.filter(t => t.ticker.toUpperCase().includes(tickerFilter));
   }
 
-  const exitFilter = $('bt-filter-exit').value;
+  const exitFilter = $('bt-filter-exit')?.value || 'ALL';
   if (exitFilter !== 'ALL') {
     txs = txs.filter(t => t.exit_reason === exitFilter);
   }

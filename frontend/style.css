@@ -299,10 +299,11 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .header-sub {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 10px;
+  font-weight: 500;
   color: var(--text-muted);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
   text-transform: uppercase;
 }
 
@@ -333,10 +334,11 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .status-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 10px;
+  font-weight: 600;
   color: var(--text-muted);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
 }
 
 .header-clock {
@@ -375,17 +377,19 @@ h1, h2, h3, h4, h5, h6 {
 
 .tile-label {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.8px;
+  letter-spacing: 1px;
 }
 
 .tile-value {
-  font-family: var(--font-mono);
-  font-size: 20px;
-  font-weight: 500;
+  font-family: var(--font-sans);
+  font-size: 19px;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
   color: var(--text-primary);
 }
 
@@ -1429,7 +1433,7 @@ input.dashboard-filter {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  margin-top: 220px; /* offset from center iris */
+  margin-top: 280px; /* offset from center iris */
   text-align: center;
 }
 

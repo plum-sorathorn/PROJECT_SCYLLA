@@ -56,7 +56,7 @@
     </h1>
     <div class="iris-status">
       <span class="status-indicator"></span>
-      <span class="status-label">INITIALIZING TELEMETRY...</span>
+      <span class="status-label" id="startup-status-text">INITIALIZING TELEMETRY...</span>
     </div>
   </div>
 </div>
@@ -99,7 +99,7 @@
   <div class="header-brand">
     <div class="header-logo-glyph">⬡</div>
     <div class="header-title-group">
-      <h1 class="header-title" id="header-title-text">PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-style: italic;">Main Dashboard</span></h1>
+      <h1 class="header-title" id="header-title-text">PROJECT: SCYLLA <span class="header-sep">//</span> <span style="font-weight: 600; letter-spacing: 0.5px;">Main Dashboard</span></h1>
       <p class="header-sub" id="header-sub-text">VOLATILITY & FLOW TELEMETRY — POWERED BY C++ CORE & OpenBB ODP</p>
     </div>
   </div>
@@ -171,8 +171,8 @@
       <div style="padding: 16px;" id="top-trade-content">
         <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
           <div>
-            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px;">TICKER</div>
-            <div id="top-trade-ticker" style="font-family: var(--font-brand); font-size: 32px; font-weight: 600; color: var(--text);">--</div>
+            <div style="font-family: var(--font-sans); font-size: 10px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.8px;">TICKER</div>
+            <div id="top-trade-ticker" style="font-family: var(--font-sans); font-size: 28px; font-weight: 700; color: var(--text-primary);">--</div>
           </div>
           <div>
             <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px;">P(SUCCESS)</div>
@@ -267,31 +267,24 @@
             <option value="VOL_EXPANSION">VOL EXPANSION</option>
           </select>
           <input type="text" id="dash-filter-ticker" placeholder="Filter ticker..." class="filter-input dashboard-filter" style="width: 110px;" />
-          <select id="dash-sort-by" class="filter-select dashboard-filter">
-            <option value="timestamp_desc">MOST RECENT FIRST</option>
-            <option value="timestamp_asc">OLDEST FIRST</option>
-            <option value="p_success_desc">HIGHEST PROBABILITY</option>
-            <option value="kelly_desc">HIGHEST KELLY</option>
-            <option value="dte_asc">NEAREST EXPIRY</option>
-          </select>
         </div>
       </div>
       <div class="table-wrapper">
         <table class="data-table" id="open-trades-table">
           <thead>
             <tr>
-              <th>DETECTED</th>
-              <th>TICKER</th>
-              <th>EXPIRY</th>
-              <th>STRIKE</th>
-              <th>TYPE</th>
-              <th>SIDE</th>
-              <th>VOL/OI</th>
-              <th>PREMIUM</th>
-              <th>DTE</th>
-              <th>P(SUCCESS)</th>
-              <th>KELLY SIZE</th>
-              <th>STRATEGY</th>
+              <th data-sort-dash="timestamp" class="active-sort">DETECTED <span class="sort-arrow">▼</span></th>
+              <th data-sort-dash="ticker">TICKER <span class="sort-arrow"></span></th>
+              <th data-sort-dash="expiration">EXPIRY <span class="sort-arrow"></span></th>
+              <th data-sort-dash="strike">STRIKE <span class="sort-arrow"></span></th>
+              <th data-sort-dash="option_type">TYPE <span class="sort-arrow"></span></th>
+              <th data-sort-dash="side">SIDE <span class="sort-arrow"></span></th>
+              <th data-sort-dash="vol_oi_ratio">VOL/OI <span class="sort-arrow"></span></th>
+              <th data-sort-dash="premium">PREMIUM <span class="sort-arrow"></span></th>
+              <th data-sort-dash="dte">DTE <span class="sort-arrow"></span></th>
+              <th data-sort-dash="p_success">P(SUCCESS) <span class="sort-arrow"></span></th>
+              <th data-sort-dash="kelly_capped">KELLY SIZE <span class="sort-arrow"></span></th>
+              <th data-sort-dash="predicted_strategy">STRATEGY <span class="sort-arrow"></span></th>
             </tr>
           </thead>
           <tbody id="open-trades-tbody">
@@ -538,15 +531,12 @@
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">STRATEGY TYPE</label>
               <select id="bt-strategy-type" class="filter-select">
-                <option value="volatility_regime_adaptive" selected>1. Volatility Regime Adaptive (Rank #1 Default)</option>
-                <option value="directional_quantile_shift">2. Directional Quantile Shift (Rank #2)</option>
-                <option value="quantile_spread">3. Quantile Spread Filter (Rank #3)</option>
-                <option value="standard">4. Standard Portfolio (Rank #4)</option>
+                <option value="volatility_regime_adaptive">Volatility Regime Adaptive</option>
+                <option value="quantile_spread" selected>Quantile Spread Filter</option>
+                <option value="directional_quantile_shift">Directional Quantile Shift</option>
+                <option value="standard">Standard Portfolio</option>
                 <optgroup label="Other Validated Strategies">
-                  <option value="highest_prob_scan">Daily Intraday Scan (Highest Prob)</option>
-                  <option value="conservative_tight_stops">Conservative Tight-Stops</option>
                   <option value="aggressive_kelly">Aggressive Kelly Growth</option>
-                  <option value="mean_reversion_overlay">Mean Reversion Overlay</option>
                 </optgroup>
               </select>
             </div>
@@ -554,7 +544,7 @@
             <!-- Max Concurrent Trades (highest_prob_scan only) -->
             <div class="form-group" id="bt-max-concurrent-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MAX CONCURRENT TRADES</label>
-              <input type="number" id="bt-max-concurrent" value="1" min="1" step="1" class="filter-input" />
+              <input type="number" id="bt-max-concurrent" value="5" min="1" step="1" class="filter-input" />
             </div>
 
             <!-- Scan Time (highest_prob_scan only) -->
@@ -566,7 +556,7 @@
             <!-- Min Prob Threshold -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN SUCCESS PROBABILITY (%)</label>
-              <input type="number" id="bt-prob-threshold" value="65" min="2" max="98" step="1" class="filter-input" />
+              <input type="number" id="bt-prob-threshold" value="36" min="2" max="98" step="1" class="filter-input" />
             </div>
 
             <!-- Min Kelly Fraction -->
@@ -578,13 +568,31 @@
             <!-- Hard Stop Loss -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">HARD STOP LOSS (%)</label>
-              <input type="number" id="bt-hard-stop-loss" value="2" min="0" max="50" step="0.5" class="filter-input" placeholder="0 = Dynamic" />
+              <input type="number" id="bt-hard-stop-loss" value="7" min="0" max="50" step="0.5" class="filter-input" placeholder="0 = Dynamic" />
+            </div>
+
+            <!-- Kelly Allocation Cap -->
+            <div class="form-group" style="display: flex; flex-direction: column;">
+              <label class="field-label">KELLY ALLOCATION CAP (%)</label>
+              <input type="number" id="bt-kelly-cap" value="20" min="1" max="100" step="1" class="filter-input" placeholder="20%" />
             </div>
 
             <!-- Profit Threshold -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">PROFIT THRESHOLD (%)</label>
-              <input type="number" id="bt-profit-threshold" value="5" min="1" max="50" step="0.5" class="filter-input" placeholder="Override default 5%" />
+              <input type="number" id="bt-profit-threshold" value="50" min="1" max="50" step="0.5" class="filter-input" placeholder="Override default 50%" />
+            </div>
+
+            <!-- Max Quantile Spread -->
+            <div class="form-group" style="display: flex; flex-direction: column;">
+              <label class="field-label">MAX QUANTILE SPREAD</label>
+              <input type="number" id="bt-max-quantile-spread" value="4.0" min="0.5" max="10.0" step="0.5" class="filter-input" placeholder="4.0" />
+            </div>
+
+            <!-- Min Median Return -->
+            <div class="form-group" style="display: flex; flex-direction: column;">
+              <label class="field-label">MIN MEDIAN RETURN (%)</label>
+              <input type="number" id="bt-min-median-return" value="3" min="0.5" max="20" step="0.5" class="filter-input" placeholder="3%" />
             </div>
 
             <!-- Initial Capital -->
@@ -603,9 +611,9 @@
             <div class="form-group" style="display: flex; flex-direction: column; grid-column: 1 / -1;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <label class="field-label">LOOKBACK PERIOD</label>
-                <span id="bt-lookback-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">1095 DAYS</span>
+                <span id="bt-lookback-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">ALL DATA (ENTIRE DATASET)</span>
               </div>
-              <input type="range" id="bt-lookback-days" min="0" max="3650" value="1095" step="30" class="filter-slider" />
+              <input type="range" id="bt-lookback-days" min="0" max="3650" value="0" step="30" class="filter-slider" />
               <div style="display: flex; justify-content: space-between; font-size: 9px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 3px;">
                 <span>ALL</span>
                 <span>1Y</span>
@@ -623,11 +631,11 @@
             <div id="kelly-config-group">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <label class="field-label" id="kelly-label-text">KELLY MULTIPLIER</label>
-                <span id="kelly-val-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">0.50</span>
+                <span id="kelly-val-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">0.30</span>
               </div>
               <!-- Single Input -->
               <div id="kelly-single-input">
-                <input type="range" id="bt-kelly-multiplier" min="0.05" max="1.0" value="0.20" step="0.05" class="filter-slider" />
+                <input type="range" id="bt-kelly-multiplier" min="0.05" max="1.0" value="0.30" step="0.05" class="filter-slider" />
               </div>
               <!-- Sweep Inputs -->
               <div id="kelly-sweep-inputs" style="display: none; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
@@ -650,11 +658,11 @@
             <div id="stop-config-group">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <label class="field-label" id="stop-label-text">STOP MULTIPLIER (λ)</label>
-                <span id="stop-val-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">1.20</span>
+                <span id="stop-val-display" class="field-val-badge">2.00</span>
               </div>
               <!-- Single Input -->
               <div id="stop-single-input">
-                <input type="range" id="bt-stop-lambda" min="0.5" max="3.0" value="1.0" step="0.1" class="filter-slider" />
+                <input type="range" id="bt-stop-lambda" min="0.5" max="3.0" value="2.0" step="0.1" class="filter-slider" />
               </div>
               <!-- Sweep Inputs -->
               <div id="stop-sweep-inputs" style="display: none; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
@@ -700,19 +708,7 @@
       </div>
     </section>
 
-    <!-- Cache Info Banner -->
-    <div id="bt-cache-info-banner" style="display: none; grid-column: span 12; padding: 10px 16px; background: rgba(32, 160, 255, 0.1); border: 1px solid rgba(32, 160, 255, 0.4); border-radius: var(--radius); align-items: center; justify-content: space-between; margin-bottom: 8px;">
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <span style="font-size: 16px;">⚡</span>
-        <div>
-          <span style="font-family: var(--font-mono); font-size: 11px; font-weight: bold; color: var(--accent-blue);">BOOT CACHE LOADED</span>
-          <span id="bt-cache-status-text" style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">(Default #1 Strategy: Volatility Regime Adaptive)</span>
-        </div>
-      </div>
-      <div style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted);" id="bt-cache-timestamp">
-        Last computed on 2026-07-21 | Data Range: 2017-02-17 to 2026-06-24
-      </div>
-    </div>
+
 
     <!-- Performance Summary Cards -->
     <section class="card card-full" id="card-backtest-summary" style="display: none;">

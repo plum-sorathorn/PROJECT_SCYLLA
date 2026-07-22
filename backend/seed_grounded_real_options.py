@@ -9,8 +9,9 @@ import pandas as pd
 import joblib
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "scylla_ml.db"))
-CACHE_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "cache_predictions_walkforward.pkl"))
-MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "scylla_predictor.pkl"))
+CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "cache"))
+CACHE_FILE = os.path.join(CACHE_DIR, "cache_predictions_walkforward.pkl")
+MODEL_PATH = os.path.join(CACHE_DIR, "scylla_predictor.pkl")
 
 def norm_cdf(x):
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
@@ -232,7 +233,7 @@ def seed_grounded_options():
                     base_opt_vol = int(max(50, (avg_vol / 5000) * (1.0 / (1.0 + abs(m) * 5))))
                     volume = int(rng.randint(int(base_opt_vol * 0.5), int(base_opt_vol * 2.0)))
                     open_interest = int(rng.randint(int(base_opt_vol * 2.0), int(base_opt_vol * 10.0)))
-                    vol_oi_ratio = round(volume / max(1, open_interest), 2)
+                    vol_oi_ratio = round(volume / open_interest, 2) if open_interest > 0 else 0.0
 
                     iv_pct = round(contract_iv * 100.0, 2)
                     eval_date_str = dates[i + eval_days].strftime("%Y-%m-%d")

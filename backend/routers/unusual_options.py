@@ -138,17 +138,19 @@ def compute_expected_move(ticker: str) -> "float | None":
         return None
 
 
-def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
-    """Helper function to fetch and calculate raw unusual options data."""
-    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-    all_rows = []
-    sma_cache = {}
-    em_cache = {}
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for ticker in ticker_list:
+_SCANNER_CACHE = {}
+_CACHE_TTL_SECONDS = 180  # 3 minutes cache TTL
+
+
+def _process_single_ticker(ticker: str, min_vol_oi: float) -> list[dict]:
+    """Process a single ticker's option chain and compute unusual options data."""
+    try:
         df = fetch_option_chain(ticker)
         if df.empty:
-            continue
+            return []
 
         required_cols = ["volume", "openInterest", "strike", "expiration", "optionType",
                          "ticker", "underlierPrice", "impliedVolatility", "lastPrice", "bid", "ask", "lastTradeDate"]
@@ -165,16 +167,19 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
             df["volume"] = df["openInterest"]
 
         df = df[df["volume"] > 0]
+        if df.empty:
+            return []
+
         df["volOiRatio"] = df.apply(
-            lambda r: round(r["volume"] / max(r["openInterest"], 1), 2),
+            lambda r: round(r["volume"] / r["openInterest"], 2) if r["openInterest"] > 0 else 0.0,
             axis=1
         )
         df = df[df["volOiRatio"] >= min_vol_oi]
+        if df.empty:
+            return []
 
         sma_flags = compute_sma_flags(ticker)
-        sma_cache[ticker] = sma_flags
         em = compute_expected_move(ticker)
-        em_cache[ticker] = em
 
         trend_alignment = "NEUTRAL"
         if sma_flags.get("above50dSMA") and sma_flags.get("above200dSMA"):
@@ -182,6 +187,7 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
         elif not sma_flags.get("above50dSMA") and not sma_flags.get("above200dSMA"):
             trend_alignment = "BEAR_ALIGNED"
 
+        rows = []
         for _, row in df.iterrows():
             last_trade_date_str = None
             if not pd.isna(row["lastTradeDate"]):
@@ -217,8 +223,6 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
                         side = "SELL"
                     else:
                         side = "MID"
-                else:
-                    side = "MID"
 
             # Calculate Days to Expiration (DTE)
             import datetime
@@ -229,7 +233,6 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
                 dte = 0
 
             # Calculate if option is weekly or monthly
-            # Standard monthly expires on the third Friday of the month (always between 15 and 21)
             is_weekly = True
             try:
                 if exp_date.weekday() == 4 and 15 <= exp_date.day <= 21:
@@ -237,12 +240,11 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
             except Exception:
                 pass
 
-            # Calculate Option Premium (Volume * lastPrice * 100)
             last_price_val = float(row["lastPrice"]) if pd.notna(row["lastPrice"]) else 0.0
             volume_val = int(row["volume"])
             premium = round(volume_val * last_price_val * 100.0, 2)
 
-            all_rows.append({
+            rows.append({
                 "ticker": row["ticker"],
                 "expiration": str(row["expiration"]),
                 "strike": float(row["strike"]),
@@ -262,9 +264,43 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
                 "premium": premium,
                 "isWeekly": is_weekly,
             })
+        return rows
+    except Exception as e:
+        logger.warning(f"Error processing ticker {ticker}: {e}")
+        return []
+
+
+def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
+    """Helper function to fetch and calculate raw unusual options data concurrently with caching."""
+    cache_key = (tickers, min_vol_oi)
+    now = time.time()
+    if cache_key in _SCANNER_CACHE:
+        cache_time, cached_rows = _SCANNER_CACHE[cache_key]
+        if now - cache_time < _CACHE_TTL_SECONDS:
+            return cached_rows[:limit]
+
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        return []
+
+    all_rows = []
+    # Fetch option chains in parallel across max 10 worker threads
+    workers = min(10, len(ticker_list))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_single_ticker, ticker, min_vol_oi): ticker for ticker in ticker_list}
+        for future in as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    all_rows.extend(res)
+            except Exception as e:
+                t_name = futures[future]
+                logger.warning(f"Failed parallel scan for ticker {t_name}: {e}")
 
     all_rows.sort(key=lambda x: x["volOiRatio"], reverse=True)
-    return all_rows[:limit]
+    results = all_rows[:limit]
+    _SCANNER_CACHE[cache_key] = (now, results)
+    return results
 
 
 @router.get("/unusual-options")
@@ -286,6 +322,7 @@ def get_scanner(
     tickers: str = Query(default=",".join(SCAN_TICKERS), description="Comma-separated ticker list"),
     min_vol_oi: float = Query(default=8.0, description="Minimum Vol/OI ratio filter"),
     limit: int = Query(default=100, description="Max rows returned"),
+    _probe: int = Query(default=0, description="Fast health probe indicator"),
     background_tasks: BackgroundTasks = None,
 ):
     """
@@ -293,6 +330,8 @@ def get_scanner(
     log-normalized Vol/OI ratios, trend alignment classifications, expected move upper/lower ranges,
     and a summary metrics block. Used in DEV MODE directly by the frontend.
     """
+    if _probe == 1:
+        tickers = "SPY"
     raw_data = scan_raw_options(tickers, min_vol_oi, limit)
     import math
 
