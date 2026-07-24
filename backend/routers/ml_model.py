@@ -1489,26 +1489,28 @@ class BacktestRequestSchema(BaseModel):
     # Probability calibration target used to map predicted return distribution -> p_success.
     # Decoupled from profit_threshold (take-profit cap) to avoid circular over-restriction.
     calibration_target_pct: Optional[float] = 0.025
-    prob_threshold: Optional[float] = 0.35
+    prob_threshold: Optional[float] = 0.40
     kelly_multiplier: Optional[float] = 0.80
-    kelly_cap: Optional[float] = 0.30
+    kelly_cap: Optional[float] = 0.20
     stop_lambda: Optional[float] = 1.5
-    max_risk_pct_per_trade: Optional[float] = 0.03
+    max_risk_pct_per_trade: Optional[float] = 0.02
     walkforward_train_window: Optional[int] = 500
     walkforward_test_increment: Optional[int] = 100
     confirm_direct_dev: Optional[bool] = False
-    strategy_type: Optional[str] = "standard"
-    max_concurrent_trades: Optional[int] = 10
+    strategy_type: Optional[str] = "quantile_confidence"
+    max_concurrent_trades: Optional[int] = 8
     scan_time: Optional[str] = "10:00:00"
-    min_kelly_fraction: Optional[float] = 0.005
-    hard_stop_loss: Optional[float] = 0.06
+    min_kelly_fraction: Optional[float] = 0.01
+    hard_stop_loss: Optional[float] = 0.25
     lookback_days: Optional[int] = None
     profit_threshold: Optional[float] = 0.08
     max_quantile_spread: Optional[float] = 0.35
     min_median_return: Optional[float] = 0.015
     slippage_pct: Optional[float] = 0.01
-    max_iv: Optional[float] = 120.0
-    min_open_interest: Optional[int] = 0
+    max_iv: Optional[float] = 100.0
+    min_open_interest: Optional[int] = 100
+    min_dte: Optional[int] = 7
+    max_dte: Optional[int] = 60
     data_start_idx: Optional[int] = None
     data_end_idx: Optional[int] = None
 
@@ -1629,7 +1631,7 @@ def api_backtest(req: BacktestRequestSchema):
         f"{req.walkforward_test_increment}_{req.strategy_type}_{req.max_concurrent_trades}_"
         f"{req.scan_time}_{req.min_kelly_fraction}_{req.hard_stop_loss}_{req.lookback_days}_"
         f"{req.profit_threshold}_{req.calibration_target_pct}_{req.max_quantile_spread}_{req.min_median_return}_{req.slippage_pct}_{req.max_iv}_{req.min_open_interest}"
-        f"_{req.data_start_idx}_{req.data_end_idx}"
+        f"_{req.min_dte}_{req.max_dte}_{req.data_start_idx}_{req.data_end_idx}"
     )
     if cache_key_resp in _backtest_response_cache:
         print(f"api_backtest: returning cached response for key {cache_key_resp}")
@@ -1797,6 +1799,8 @@ def api_backtest(req: BacktestRequestSchema):
     slippage_pct = req.slippage_pct
     max_iv = req.max_iv
     min_open_interest = req.min_open_interest
+    min_dte = req.min_dte or 7
+    max_dte = req.max_dte or 60
 
     # Apply lookback_days filter on pre-computed predictions
     if req.lookback_days is not None and req.lookback_days > 0 and predictions:
@@ -1874,51 +1878,40 @@ def api_backtest(req: BacktestRequestSchema):
             cur_prob_threshold = prob_threshold
             eff_hard_stop = hard_stop_loss  # default; vol_regime widens this in high-IV
 
-            if strategy_type == "quantile_spread":
+            if strategy_type == "quantile_confidence":
                 iqr = q_preds["p90"] - q_preds["p10"]
-                if p_success >= cur_prob_threshold and iqr <= max_quantile_spread:
+                if p_success >= prob_threshold and iqr <= max_quantile_spread:
                     is_eligible = True
-            elif strategy_type == "directional_quantile_shift":
+            elif strategy_type == "trend_breakout":
                 trend = str(row.get("trend_alignment", ""))
                 opt_t = str(row.get("option_type", ""))
                 is_bull = (opt_t == "Call" and trend == "BULL_ALIGNED")
                 is_bear = (opt_t == "Put" and trend == "BEAR_ALIGNED")
-                if p_success >= cur_prob_threshold and q_preds["p50"] >= min_median_return and (is_bull or is_bear):
+                if p_success >= prob_threshold and q_preds["p50"] >= min_median_return and (is_bull or is_bear):
                     is_eligible = True
-            elif strategy_type == "volatility_regime_adaptive":
-                # High-IV regime: modestly raise the bar, shrink size, WIDEN the stop (give trades room).
-                # Leap from 0.70 -> modest +0.05 raise (capped at 0.60) keeps trade count alive.
+            elif strategy_type == "iv_regime_adaptive":
                 iv = float(row.get("implied_vol", 30))
-                if iv > 35.0:
-                    cur_prob_threshold = min(cur_prob_threshold + 0.05, 0.60)
-                    cur_kelly_cap = min(kelly_cap, 0.15)
-                    eff_hard_stop = hard_stop_loss * 1.2
-                if p_success >= cur_prob_threshold:
-                    is_eligible = True
-            elif strategy_type == "confluence_sniper":
-                # LOOSENED AGGRESSIVELY: regime-aware but permissive — adds contrarian/hedged paths
-                # and drops the min_median_return gate so viable trades aren't choked out.
-                trend = str(row.get("trend_alignment", ""))
-                opt_t = str(row.get("option_type", ""))
-                side = str(row.get("side", ""))
-                iv = float(row.get("implied_vol", 30))
-                iqr = q_preds["p90"] - q_preds["p10"]
-                is_put_sell_bull_neutral = (opt_t == "Put" and side == "SELL" and trend in ("BULL_ALIGNED", "NEUTRAL"))
-                is_call_buy_bear_neutral = (opt_t == "Call" and side == "BUY" and trend in ("BEAR_ALIGNED", "NEUTRAL"))
-                is_put_buy_bull = (opt_t == "Put" and side == "BUY" and trend == "BULL_ALIGNED")
-                is_call_sell_bear = (opt_t == "Call" and side == "SELL" and trend == "BEAR_ALIGNED")
-                regime_ok = is_put_sell_bull_neutral or is_call_buy_bear_neutral or is_put_buy_bull or is_call_sell_bear
-                iv_ok = (max_iv is None or max_iv <= 0 or iv <= max_iv)
-                iqr_ok = (iqr <= max_quantile_spread)
-                prob_ok = (p_success >= cur_prob_threshold)
-                if regime_ok and iv_ok and iqr_ok and prob_ok:
-                    is_eligible = True
+                if iv < 30.0:
+                    if p_success >= prob_threshold:
+                        is_eligible = True
+                else:
+                    cur_prob_threshold = max(prob_threshold, 0.50)
+                    cur_kelly_cap = min(kelly_cap, 0.12)
+                    eff_hard_stop = hard_stop_loss * 1.15
+                    if p_success >= cur_prob_threshold:
+                        is_eligible = True
             else:
-                # Default / Standard / Conservative / Aggressive strategies
                 if p_success >= cur_prob_threshold:
                     is_eligible = True
 
             if is_eligible:
+                # DTE filter: skip contracts outside acceptable maturity range
+                row_dte = row.get('dte')
+                if row_dte is not None:
+                    row_dte = int(row_dte)
+                    if row_dte < min_dte or row_dte > max_dte:
+                        continue
+
                 # Liquidity filter: skip illiquid contracts unless caller opts in
                 row_oi = row.get('open_interest')
                 if min_open_interest > 0 and (row_oi is None or int(row_oi) < min_open_interest):
@@ -1974,7 +1967,7 @@ def api_backtest(req: BacktestRequestSchema):
                     exit_reason = "profit_hit"
                     trade_return = profit_threshold
                 else:
-                    exit_reason = "expired"
+                    exit_reason = "expired_profit" if observed_return > 0 else "expired_loss"
                     trade_return = observed_return
 
                 trade_return -= slippage_pct
@@ -1997,6 +1990,7 @@ def api_backtest(req: BacktestRequestSchema):
                     "max_adverse_return": round(max_adverse_return, 4),
                     "exit_reason": exit_reason,
                     "observed_return": round(trade_return, 4),
+                    "actual_return": round(float(row['observed_return']), 4) if row['observed_return'] is not None else 0.0,
                     "pnl_usd": round(pnl_usd, 2)
                 })
 
@@ -2152,6 +2146,42 @@ def api_get_optimal_params():
         "mtime": os.path.getmtime(path),
         "optimal": data,
     }
+
+
+STRATEGY_DEFAULTS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config",
+    "strategy_defaults.json"
+)
+
+
+@router.get("/ml/strategy-defaults")
+def api_get_strategy_defaults():
+    """Returns the consolidated strategy defaults from strategy_defaults.json.
+    Single source of truth for frontend/backend parameter synchronization.
+    """
+    try:
+        if os.path.exists(STRATEGY_DEFAULTS_PATH):
+            with open(STRATEGY_DEFAULTS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "available": True,
+                "path": STRATEGY_DEFAULTS_PATH,
+                "mtime": os.path.getmtime(STRATEGY_DEFAULTS_PATH),
+                "config": data,
+            }
+        return {
+            "available": False,
+            "message": "strategy_defaults.json not found.",
+            "config": None,
+        }
+    except Exception as ex:
+        logger.warning(f"Failed to read strategy_defaults: {ex}")
+        return {
+            "available": False,
+            "message": f"Error reading config: {ex}",
+            "config": None,
+        }
 
 
 @router.get("/ml/backtest/default_cache")

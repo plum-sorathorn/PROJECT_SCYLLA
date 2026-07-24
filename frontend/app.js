@@ -1307,16 +1307,18 @@ async function fetchOpenTrades() {
 }
 
 const STRATEGY_DEFAULT_PARAMS = {
-  confluence_sniper: { prob: 40, kelly: 0.75, kelly_cap: 20, stop: 1.5, hard_stop: 30, max_spread: 4.5, median_ret: 5, max_iv: 45 },
-  volatility_regime_adaptive: { prob: 60, kelly: 0.45, kelly_cap: 25, stop: 2.0, hard_stop: 7, max_spread: 5.0, median_ret: 3, max_iv: 0 },
-  quantile_spread: { prob: 60, kelly: 0.60, kelly_cap: 15, stop: 2.0, hard_stop: 7, max_spread: 5.5, median_ret: 3, max_iv: 0 },
-  directional_quantile_shift: { prob: 60, kelly: 0.30, kelly_cap: 35, stop: 2.0, hard_stop: 7, max_spread: 5.0, median_ret: 5, max_iv: 0 },
-  standard: { prob: 60, kelly: 0.30, kelly_cap: 35, stop: 1.0, hard_stop: 7, max_spread: 5.0, median_ret: 3, max_iv: 0 },
+  quantile_confidence: { prob: 40, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, max_spread: 0.20, median_ret: 0, max_iv: 0, profit: 27.5 },
+  trend_breakout: { prob: 38, kelly: 0.90, kelly_cap: 12, stop: 1.5, hard_stop: 25, max_spread: 0, median_ret: 2, max_iv: 0, profit: 30 },
+  iv_regime_adaptive: { prob: 38, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, max_spread: 0, median_ret: 0, max_iv: 0, profit: 30 },
 };
 
 function getStrategyParams(strategyType) {
   if (state.optimalParams && state.optimalParams[strategyType] && state.optimalParams[strategyType].params) {
     return mapApiOptimalToFormInputs(state.optimalParams[strategyType].params);
+  }
+  if (state.strategyDefaults && state.strategyDefaults.strategies && state.strategyDefaults.strategies[strategyType]) {
+    const s = state.strategyDefaults.strategies[strategyType];
+    return mapApiOptimalToFormInputs(s);
   }
   return FALLBACK_OPT_PARAMS[strategyType] || null;
 }
@@ -1341,27 +1343,17 @@ function isEligibleForStrategy(trade, strategyType) {
   const maxQuantileSpread = p.max_spread || 5.0;
   const maxIv = p.max_iv || 0;
 
-  if (strategyType === 'quantile_spread') {
+  if (strategyType === 'quantile_confidence') {
     return pSuccess >= probThreshold && iqr <= maxQuantileSpread;
   }
-  if (strategyType === 'directional_quantile_shift') {
+  if (strategyType === 'trend_breakout') {
     const isBull = (optType === 'Call' && trend === 'BULL_ALIGNED');
     const isBear = (optType === 'Put' && trend === 'BEAR_ALIGNED');
     return pSuccess >= probThreshold && p50 >= minMedianReturn && (isBull || isBear);
   }
-  if (strategyType === 'volatility_regime_adaptive') {
-    const curProb = iv > 35.0 ? Math.max(probThreshold, 0.70) : probThreshold;
+  if (strategyType === 'iv_regime_adaptive') {
+    const curProb = iv >= 30.0 ? Math.max(probThreshold, 0.50) : probThreshold;
     return pSuccess >= curProb;
-  }
-  if (strategyType === 'confluence_sniper') {
-    const isPutSellBullNeutral = (optType === 'Put' && side === 'SELL' && (trend === 'BULL_ALIGNED' || trend === 'NEUTRAL'));
-    const isCallBuyBearNeutral = (optType === 'Call' && side === 'BUY' && (trend === 'BEAR_ALIGNED' || trend === 'NEUTRAL'));
-    const regimeOk = isPutSellBullNeutral || isCallBuyBearNeutral;
-    const ivOk = (!maxIv || iv <= maxIv);
-    const iqrOk = (iqr <= maxQuantileSpread);
-    const medianOk = (p50 >= minMedianReturn);
-    const probOk = (pSuccess >= probThreshold);
-    return regimeOk && ivOk && iqrOk && medianOk && probOk;
   }
   return pSuccess >= probThreshold;
 }
@@ -1411,7 +1403,6 @@ function renderOpenTradesTable() {
           `KELLY CAP: ${p.kelly_cap}%`,
           p.max_spread ? `MAX SPREAD: ${p.max_spread}` : null,
           p.median_ret ? `MIN MEDIAN RET: ${p.median_ret}%` : null,
-          p.max_iv ? `MAX IV: ${p.max_iv}%` : null,
         ].filter(Boolean).join(' | ');
         bannerTextEl.innerHTML = `<strong>ACTIVE STRATEGY [${btStrategyFilter.toUpperCase().replace(/_/g, ' ')}]:</strong> ${rules}`;
       }
@@ -1628,11 +1619,9 @@ function setupEventListeners() {
 // expect prob/kelly_cap/hard_stop/median_ret in percent (×100), kelly/stop_lambda
 // as fractions, max_spread/max_iv as absolute, profit_threshold in percent.
 const FALLBACK_OPT_PARAMS = {
-  'confluence_sniper':          { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 70 },
-  'volatility_regime_adaptive': { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
-  'quantile_spread':            { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 5,  profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
-  'standard':                   { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
-  'directional_quantile_shift': { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
+  'quantile_confidence': { prob: 40, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, concurrent: 8, profit: 27.5, median_ret: 0,  max_spread: 0.20, max_iv: 0 },
+  'trend_breakout':      { prob: 38, kelly: 0.90, kelly_cap: 12, stop: 1.5, hard_stop: 25, concurrent: 8, profit: 30, median_ret: 2,  max_spread: 0, max_iv: 0 },
+  'iv_regime_adaptive':  { prob: 38, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, concurrent: 8, profit: 30, median_ret: 0,  max_spread: 0, max_iv: 0 },
 };
 
 function mapApiOptimalToFormInputs(params) {
@@ -1654,6 +1643,24 @@ function mapApiOptimalToFormInputs(params) {
 }
 
 async function loadOptimalParams() {
+  // Load strategy defaults from consolidated config
+  try {
+    const r = await fetch(`${API_BASE}/api/ml/strategy-defaults`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (data && data.available && data.config) {
+      state.strategyDefaults = data.config;
+      console.info(`[strategy-defaults] loaded from ${data.path}`);
+    } else {
+      state.strategyDefaults = null;
+      console.warn('[strategy-defaults] not found — using hardcoded fallback values');
+    }
+  } catch (e) {
+    state.strategyDefaults = null;
+    console.warn(`[strategy-defaults] fetch failed: ${e.message} — using fallback values`);
+  }
+
+  // Load sweep-optimal params (overrides defaults if available)
   try {
     const r = await fetch(`${API_BASE}/api/ml/optimal-params`, { signal: AbortSignal.timeout(5000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1718,7 +1725,6 @@ async function loadOptimalParams() {
       if (p.max_spread !== undefined && $('bt-max-quantile-spread')) $('bt-max-quantile-spread').value = p.max_spread;
       if (p.profit !== undefined && $('bt-profit-threshold')) $('bt-profit-threshold').value = p.profit;
       if (p.median_ret !== undefined && $('bt-min-median-return')) $('bt-min-median-return').value = p.median_ret;
-      if (p.max_iv !== undefined && $('bt-max-iv')) $('bt-max-iv').value = p.max_iv;
     }
   });
 
@@ -2051,8 +2057,17 @@ async function loadDefaultBacktestCache() {
 async function runBacktestSimulation(e) {
   if (e) e.preventDefault();
   if (state.backtestLoading) return;
+  state.backtestLoading = true;
+  setLoading('backtest-loading', true);
   
-  const mode = $('bt-mode').value;
+  const modeEl = $('bt-mode');
+  if (!modeEl) {
+    console.error('bt-mode element not found');
+    state.backtestLoading = false;
+    setLoading('backtest-loading', false);
+    return;
+  }
+  const mode = modeEl.value;
   const initialCapital = parseFloat($('bt-initial-capital').value) || 100000;
   const probThreshold = (parseFloat($('bt-prob-threshold').value) || 40) / 100.0;
   const maxRisk = (parseFloat($('bt-max-risk').value) || 3.0) / 100.0;
@@ -2068,17 +2083,15 @@ async function runBacktestSimulation(e) {
   const lookbackDaysRaw = parseInt($('bt-lookback-days')?.value) || 0;
   const lookbackDays = lookbackDaysRaw > 0 ? lookbackDaysRaw : null;
   const profitThresholdInput = parseFloat($('bt-profit-threshold')?.value);
-  const profitThreshold = !isNaN(profitThresholdInput) ? (profitThresholdInput > 1.0 ? profitThresholdInput / 100.0 : profitThresholdInput) : 0.06;
+  const profitThreshold = !isNaN(profitThresholdInput) ? (profitThresholdInput > 1.0 ? profitThresholdInput / 100.0 : profitThresholdInput) : 0.08;
   // Strategy-specific params — read from dedicated inputs if they exist, else use optimal defaults
-  const kellyCapRaw = parseFloat($('bt-kelly-cap')?.value) || 30.0;
+  const kellyCapRaw = parseFloat($('bt-kelly-cap')?.value) || 20.0;
   const kellyCap = kellyCapRaw > 1.0 ? kellyCapRaw / 100.0 : kellyCapRaw;
-  const maxQuantileSpread = parseFloat($('bt-max-quantile-spread')?.value) || 0.15;
-  const minMedianReturnRaw = parseFloat($('bt-min-median-return')?.value) || 4.0;
+  const maxQuantileSpread = parseFloat($('bt-max-quantile-spread')?.value) || 0.20;
+  const minMedianReturnRaw = parseFloat($('bt-min-median-return')?.value) || 2.0;
   const minMedianReturn = minMedianReturnRaw > 1.0 ? minMedianReturnRaw / 100.0 : minMedianReturnRaw;
-  const maxIvRaw = parseFloat($('bt-max-iv')?.value) || 70;
-  const maxIv = maxIvRaw > 0 ? maxIvRaw : null;
   const slippagePctRaw = parseFloat($('bt-slippage-pct')?.value);
-  const slippagePct = !isNaN(slippagePctRaw) ? (slippagePctRaw > 1.0 ? slippagePctRaw / 100.0 : slippagePctRaw) : 0.02;
+  const slippagePct = !isNaN(slippagePctRaw) ? (slippagePctRaw > 1.0 ? slippagePctRaw / 100.0 : slippagePctRaw) : 0.01;
 
   let confirmDirectDev = false;
   if (mode === 'direct_dev') {
@@ -2091,9 +2104,6 @@ async function runBacktestSimulation(e) {
     }
     confirmDirectDev = true;
   }
-  
-  // Show spinner or skeleton loading state
-  setLoading('backtest-loading', true);
   
   try {
     if (isSweep) {
@@ -2149,7 +2159,6 @@ async function runBacktestSimulation(e) {
             profit_threshold: profitThreshold,
             max_quantile_spread: maxQuantileSpread,
             min_median_return: minMedianReturn,
-            max_iv: maxIv,
             slippage_pct: slippagePct
           };
           
@@ -2211,7 +2220,6 @@ async function runBacktestSimulation(e) {
         profit_threshold: profitThreshold,
         max_quantile_spread: maxQuantileSpread,
         min_median_return: minMedianReturn,
-        max_iv: maxIv,
         slippage_pct: slippagePct
       };
 
@@ -2237,11 +2245,8 @@ async function runBacktestSimulation(e) {
       loadBacktestData(data);
     }
   } catch (err) {
-    if (!state.booting) {
-      alert(`Simulation failed: ${err.message}`);
-    } else {
-      console.error(`Boot simulation failed: ${err.message}`);
-    }
+    alert(`Simulation failed: ${err.message}`);
+    console.error('Backtest error:', err);
   } finally {
     setLoading('backtest-loading', false);
     state.directDevConfirmed = false;
@@ -2553,10 +2558,21 @@ function renderBacktestLedgerTable() {
   tbody.innerHTML = txs.map(t => {
     const isProfit = t.exit_reason === 'profit_hit';
     const isStop = t.exit_reason === 'stop_hit';
+    const isExpiredProfit = t.exit_reason === 'expired_profit';
+    const isExpiredLoss = t.exit_reason === 'expired_loss';
     
-    const statusBadge = isProfit 
-      ? '<span class="badge-buy">PROFIT HIT</span>' 
-      : (isStop ? '<span class="badge-sell">STOP HIT</span>' : '<span class="badge-mid">EXPIRED</span>');
+    let statusBadge;
+    if (isProfit) {
+      statusBadge = '<span class="badge-buy">PROFIT HIT</span>';
+    } else if (isStop) {
+      statusBadge = '<span class="badge-sell">STOP HIT</span>';
+    } else if (isExpiredProfit) {
+      statusBadge = '<span class="badge-buy">EXPIRED +</span>';
+    } else if (isExpiredLoss) {
+      statusBadge = '<span class="badge-sell">EXPIRED -</span>';
+    } else {
+      statusBadge = '<span class="badge-mid">EXPIRED</span>';
+    }
       
     const pnlClass = t.pnl_usd >= 0 ? 'accent-call' : 'accent-coral';
     const returnClass = t.observed_return >= 0 ? 'accent-call' : 'accent-coral';
