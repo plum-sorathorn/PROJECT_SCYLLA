@@ -1,4 +1,4 @@
-# AGENTS.md — AI Assistant Configuration for PROJECT SCYLLA
+﻿# AGENTS.md â€” AI Assistant Configuration for PROJECT SCYLLA
 
 This document describes the AI assistant integrations and agent workflows configured for this project.
 
@@ -15,10 +15,10 @@ Primary agent configuration directory containing rules and workflows.
 
 ```
 .agents/
-├── rules/       # Behavioral rules applied to AI agents
-│   └── graphify.md
-└── workflows/   # Reusable agent workflows
-    └── graphify.md
+â”œâ”€â”€ rules/       # Behavioral rules applied to AI agents
+â”‚   â””â”€â”€ graphify.md
+â””â”€â”€ workflows/   # Reusable agent workflows
+    â””â”€â”€ graphify.md
 ```
 
 ### `.gemini/`
@@ -26,7 +26,7 @@ Google Gemini CLI configuration directory.
 
 ```
 .gemini/
-└── settings.json   # Tool hooks and agent behavior settings
+â””â”€â”€ settings.json   # Tool hooks and agent behavior settings
 ```
 
 ---
@@ -40,7 +40,7 @@ This project has a knowledge graph at graphify-out/ with god nodes, community st
 When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
 
 Rules:
-- Before using list, grep, or read to explore any part of this codebase you are not already certain about, you MUST first run graphify query "<question>" (CLI) or query_graph (MCP, if registered) if graphify-out/graph.json exists. This applies to implementation tasks, bug fixes, and refactors -- not only literal questions.
+- Before using ListDir, Grep, or Read to explore any part of this codebase you are not already certain about, you MUST first run graphify query "<question>" (CLI) or query_graph (MCP, if available) if graphify-out/graph.json exists. This applies to implementation tasks, bug fixes, and refactors -- not only literal questions.
 - Do NOT begin a task by listing directories or grepping broadly. Locate relevant files via graphify query / query_graph first, then read only the specific files it points to.
 - Use graphify path "<A>" "<B>" / shortest_path (MCP) to understand relationships between two named components, and graphify explain "<concept>" / get_node (MCP) for a focused summary of one concept or module.
 - These return a scoped subgraph, almost always far smaller than GRAPH_REPORT.md or raw grep output -- treat them as strictly cheaper than manual exploration.
@@ -48,9 +48,7 @@ Rules:
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review, or when query/path/explain do not surface enough context.
 - Exception: once graphify has pointed you to specific files, reading their full contents directly is correct and expected -- the rule only governs how you locate code, not whether you read it once found.
 - The graphify CLI is already installed and available directly on PATH. NEVER run it via npx, npm exec, or pip -- always call it as a plain 'graphify <command>' shell command.
-- After modifying code, run graphify update . to keep the graph current (AST-only, no API cost).
-- If the opencode-model-router plugin is active, treat graphify query/path/explain calls as @fast-tier work (read-only lookups), not @medium/@heavy.
-## Gemini CLI Integration
+- After modifying code, run graphify update . to keep the graph current (AST-only, no API cost).## Gemini CLI Integration
 
 **Settings File:** `.gemini/settings.json`
 
@@ -73,7 +71,7 @@ Configures tool hooks for the Gemini CLI assistant:
 | After modifying code | `graphify update .` |
 
 ### Best Practices
-# AGENTS.md — AI Assistant Configuration for PROJECT SCYLLA
+# AGENTS.md â€” AI Assistant Configuration for PROJECT SCYLLA
 
 This document describes the AI assistant integrations and agent workflows configured for this project.
 
@@ -90,10 +88,10 @@ Primary agent configuration directory containing rules and workflows.
 
 ```
 .agents/
-├── rules/       # Behavioral rules applied to AI agents
-│   └── graphify.md
-└── workflows/   # Reusable agent workflows
-    └── graphify.md
+â”œâ”€â”€ rules/       # Behavioral rules applied to AI agents
+â”‚   â””â”€â”€ graphify.md
+â””â”€â”€ workflows/   # Reusable agent workflows
+    â””â”€â”€ graphify.md
 ```
 
 ### `.gemini/`
@@ -101,14 +99,14 @@ Google Gemini CLI configuration directory.
 
 ```
 .gemini/
-└── settings.json   # Tool hooks and agent behavior settings
+â””â”€â”€ settings.json   # Tool hooks and agent behavior settings
 ```
 
 ---
 
 ## Configured Agents & Workflows
 
-### graphify — Knowledge Graph Navigator
+### graphify â€” Knowledge Graph Navigator
 
 **Purpose:** Transforms the codebase into a navigable knowledge graph for efficient code exploration and architecture understanding.
 
@@ -137,9 +135,9 @@ graphify update .
 ```
 
 **Output Location:** `graphify-out/`
-- `graph.json` — Structured graph data
-- `GRAPH_REPORT.md` — Full architecture report
-- `wiki/index.md` — Navigation wiki (if generated)
+- `graph.json` â€” Structured graph data
+- `GRAPH_REPORT.md` â€” Full architecture report
+- `wiki/index.md` â€” Navigation wiki (if generated)
 
 ---
 
@@ -168,7 +166,7 @@ Configures tool hooks for the Gemini CLI assistant:
 ### Best Practices
 
 1. **Graph-First Navigation:** Always query the knowledge graph before grepping or listing directories
-2. **Scoped Exploration:** Use query/path/explain for focused results — cheaper than manual exploration
+2. **Scoped Exploration:** Use query/path/explain for focused results â€” cheaper than manual exploration
 3. **Keep Graph Current:** Run `graphify update .` after code changes
 4. **Direct File Reads OK:** Once graphify points to specific files, read them directly
 

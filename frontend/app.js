@@ -44,7 +44,11 @@ const state = {
   backtestSweepResults: null,
   backtestSortKey: 'trade_date',
   backtestSortDir: -1,
-  directDevConfirmed: false
+  directDevConfirmed: false,
+
+  // Optimal params loaded from /api/ml/optimal-params (scripts/sweep_optimal.json)
+  optimalParams: null,
+  optimalParamsSource: 'pending',
 };
 
 // ── Utility ─────────────────────────────────────────────────
@@ -784,7 +788,7 @@ async function refreshTactical() {
 // ── Fetch ML Stats ───────────────────────────────────────────
 async function fetchStats() {
   try {
-    const r = await fetch(`${API_BASE}/api/ml/stats`);
+    const r = await fetch(`${API_BASE}/api/ml/stats`, { signal: AbortSignal.timeout(10000) });
     const data = await r.json();
     state.mlStats = data;
     
@@ -816,13 +820,15 @@ async function fetchStats() {
 async function fetchTrades() {
   setLoading('ledger-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/ml/trades?limit=50`);
+    const r = await fetch(`${API_BASE}/api/ml/trades?limit=50`, { signal: AbortSignal.timeout(10000) });
     const json = await r.json();
     state.mlTrades = json.data || [];
     renderLedgerTable();
   } catch (e) {
     const tbody = $('ledger-tbody');
-    tbody.innerHTML = `<tr><td colspan="11" class="table-empty">[ ERROR: PIPELINE SERVER OFFLINE — CONNECTION REFUSED ]</td></tr>`;
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="11" class="table-empty">[ ERROR: PIPELINE SERVER OFFLINE — CONNECTION REFUSED ]</td></tr>`;
+    }
     console.error('Ledger fetch error:', e);
   } finally {
     setLoading('ledger-loading', false);
@@ -912,16 +918,24 @@ function renderLedgerTable() {
 }
 
 // ── Run Labeling Worker ──────────────────────────────────────
-async function runLabeling() {
-  const btn = $('btn-run-labeling');
+async function runLabeling(forceReLabel = false) {
+  const btnId = forceReLabel ? 'btn-force-relabel' : 'btn-run-labeling';
+  const btn = $(btnId);
   const prevText = btn.textContent;
-  btn.textContent = 'LABELING RUNNING...';
+  btn.textContent = forceReLabel ? 'RE-LABELING ALL TRADES...' : 'LABELING RUNNING...';
   btn.disabled = true;
+  
+  if (forceReLabel && !confirm('This will reset and re-compute labels for ALL trades. This may take several minutes. Continue?')) {
+    btn.textContent = prevText;
+    btn.disabled = false;
+    return;
+  }
   
   try {
     const horizon = $('cfg-horizon').value || 10;
     const threshold = $('cfg-threshold').value || 0.03;
-    const r = await fetch(`${API_BASE}/api/ml/label?horizon_days=${horizon}&profit_threshold=${threshold}`, { method: 'POST' });
+    const forceParam = forceReLabel ? '&force=true' : '';
+    const r = await fetch(`${API_BASE}/api/ml/label?horizon_days=${horizon}&profit_threshold=${threshold}${forceParam}`, { method: 'POST' });
     const res = await r.json();
     alert(`Labeling run finished. Labeled ${res.labeled_count} trades.`);
     await refreshML();
@@ -1001,12 +1015,12 @@ function renderFeatureImportances(list) {
 // ── Fetch settings ───────────────────────────────────────────
 async function fetchSettings() {
   try {
-    const r = await fetch(`${API_BASE}/api/ml/settings`);
+    const r = await fetch(`${API_BASE}/api/ml/settings`, { signal: AbortSignal.timeout(10000) });
     const json = await r.json();
     state.mlSettings = json;
     
-    $('cfg-horizon').value = json.horizon_days || '10';
-    $('cfg-threshold').value = Number(json.profit_threshold).toFixed(2);
+    if ($('cfg-horizon')) $('cfg-horizon').value = json.horizon_days || '10';
+    if ($('cfg-threshold')) $('cfg-threshold').value = Number(json.profit_threshold).toFixed(2);
   } catch (e) {
     console.error('Settings fetch error:', e);
   }
@@ -1014,35 +1028,40 @@ async function fetchSettings() {
 
 // ── Save settings ────────────────────────────────────────────
 async function saveSettings() {
-  const horizon = $('cfg-horizon').value;
-  const threshold = $('cfg-threshold').value;
+  const horizon = $('cfg-horizon')?.value || '10';
+  const threshold = $('cfg-threshold')?.value || '1.0';
   const statusEl = $('settings-status');
   
   try {
-    statusEl.textContent = 'SAVING...';
+    if (statusEl) statusEl.textContent = 'SAVING...';
     const r = await fetch(`${API_BASE}/api/ml/settings?horizon_days=${horizon}&profit_threshold=${threshold}`, {
-      method: 'POST'
+      method: 'POST',
+      signal: AbortSignal.timeout(10000)
     });
     const res = await r.json();
     if (res.status === 'success') {
-      statusEl.textContent = 'CONFIGURATION PERSISTED';
-      statusEl.style.color = 'var(--buy)';
-      setTimeout(() => {
-        statusEl.textContent = '';
-        statusEl.style.color = 'var(--text-muted)';
-      }, 3000);
+      if (statusEl) {
+        statusEl.textContent = 'CONFIGURATION PERSISTED';
+        statusEl.style.color = 'var(--buy)';
+        setTimeout(() => {
+          statusEl.textContent = '';
+          statusEl.style.color = 'var(--text-muted)';
+        }, 3000);
+      }
       await fetchSettings();
     }
   } catch (e) {
-    statusEl.textContent = 'SAVE FAILED';
-    statusEl.style.color = 'var(--put)';
+    if (statusEl) {
+      statusEl.textContent = 'SAVE FAILED';
+      statusEl.style.color = 'var(--put)';
+    }
   }
 }
 
 // ── Fetch model runs ─────────────────────────────────────────
 async function fetchModelRuns() {
   try {
-    const r = await fetch(`${API_BASE}/api/ml/model-runs`);
+    const r = await fetch(`${API_BASE}/api/ml/model-runs`, { signal: AbortSignal.timeout(10000) });
     const json = await r.json();
     state.mlModelRuns = json.data || [];
     renderModelRunsTable();
@@ -1287,6 +1306,66 @@ async function fetchOpenTrades() {
   }
 }
 
+const STRATEGY_DEFAULT_PARAMS = {
+  confluence_sniper: { prob: 40, kelly: 0.75, kelly_cap: 20, stop: 1.5, hard_stop: 30, max_spread: 4.5, median_ret: 5, max_iv: 45 },
+  volatility_regime_adaptive: { prob: 60, kelly: 0.45, kelly_cap: 25, stop: 2.0, hard_stop: 7, max_spread: 5.0, median_ret: 3, max_iv: 0 },
+  quantile_spread: { prob: 60, kelly: 0.60, kelly_cap: 15, stop: 2.0, hard_stop: 7, max_spread: 5.5, median_ret: 3, max_iv: 0 },
+  directional_quantile_shift: { prob: 60, kelly: 0.30, kelly_cap: 35, stop: 2.0, hard_stop: 7, max_spread: 5.0, median_ret: 5, max_iv: 0 },
+  standard: { prob: 60, kelly: 0.30, kelly_cap: 35, stop: 1.0, hard_stop: 7, max_spread: 5.0, median_ret: 3, max_iv: 0 },
+};
+
+function getStrategyParams(strategyType) {
+  if (state.optimalParams && state.optimalParams[strategyType] && state.optimalParams[strategyType].params) {
+    return mapApiOptimalToFormInputs(state.optimalParams[strategyType].params);
+  }
+  return FALLBACK_OPT_PARAMS[strategyType] || null;
+}
+
+function isEligibleForStrategy(trade, strategyType) {
+  if (!strategyType || strategyType === 'ALL') return true;
+  const p = getStrategyParams(strategyType);
+  if (!p) return true;
+
+  const pSuccess = Number(trade.p_success) || 0;
+  const p10 = Number(trade.predicted_p10) || 0;
+  const p50 = Number(trade.predicted_p50) || 0;
+  const p90 = Number(trade.predicted_p90) || 0;
+  const iqr = p90 - p10;
+  const iv = Number(trade.implied_vol) || 0;
+  const optType = trade.option_type || '';
+  const side = trade.side || '';
+  const trend = trade.trend_alignment || '';
+
+  const probThreshold = (p.prob != null ? p.prob : 40) / 100.0;
+  const minMedianReturn = (p.median_ret != null ? p.median_ret : 3) / 100.0;
+  const maxQuantileSpread = p.max_spread || 5.0;
+  const maxIv = p.max_iv || 0;
+
+  if (strategyType === 'quantile_spread') {
+    return pSuccess >= probThreshold && iqr <= maxQuantileSpread;
+  }
+  if (strategyType === 'directional_quantile_shift') {
+    const isBull = (optType === 'Call' && trend === 'BULL_ALIGNED');
+    const isBear = (optType === 'Put' && trend === 'BEAR_ALIGNED');
+    return pSuccess >= probThreshold && p50 >= minMedianReturn && (isBull || isBear);
+  }
+  if (strategyType === 'volatility_regime_adaptive') {
+    const curProb = iv > 35.0 ? Math.max(probThreshold, 0.70) : probThreshold;
+    return pSuccess >= curProb;
+  }
+  if (strategyType === 'confluence_sniper') {
+    const isPutSellBullNeutral = (optType === 'Put' && side === 'SELL' && (trend === 'BULL_ALIGNED' || trend === 'NEUTRAL'));
+    const isCallBuyBearNeutral = (optType === 'Call' && side === 'BUY' && (trend === 'BEAR_ALIGNED' || trend === 'NEUTRAL'));
+    const regimeOk = isPutSellBullNeutral || isCallBuyBearNeutral;
+    const ivOk = (!maxIv || iv <= maxIv);
+    const iqrOk = (iqr <= maxQuantileSpread);
+    const medianOk = (p50 >= minMedianReturn);
+    const probOk = (pSuccess >= probThreshold);
+    return regimeOk && ivOk && iqrOk && medianOk && probOk;
+  }
+  return pSuccess >= probThreshold;
+}
+
 function renderOpenTradesTable() {
   const tbody = $('open-trades-tbody');
   if (!tbody) return;
@@ -1299,10 +1378,82 @@ function renderOpenTradesTable() {
     trades = trades.filter(t => (t.ticker || '').toUpperCase().includes(tickerFilter));
   }
 
-  // Filter by strategy
+  // Filter by ML-predicted strategy regime (SIDEWAYS / BULLISH_BREAKOUT / etc.)
   const strategyFilter = $('dash-filter-strategy')?.value || 'ALL';
   if (strategyFilter !== 'ALL') {
     trades = trades.filter(t => t.predicted_strategy === strategyFilter);
+  }
+
+  // Filter by backtester strategy type — mirrors api_backtest entry rules.
+  // Uses each strategy's optimal OOS parameters from sweep_optimal.json.
+  const btStrategyFilter = $('dash-filter-bt-strategy')?.value || 'ALL';
+  const bannerEl = $('dash-bt-strategy-banner');
+  const bannerTextEl = $('dash-strategy-banner-text');
+  const bannerMetricsEl = $('dash-strategy-banner-metrics');
+
+  if (btStrategyFilter !== 'ALL') {
+    const totalBefore = trades.length;
+    trades = trades.filter(t => isEligibleForStrategy(t, btStrategyFilter));
+    const countEl = $('dash-bt-strategy-count');
+    if (countEl) countEl.textContent = `${trades.length}/${totalBefore} MATCH`;
+
+    // Render Strategy Threshold Banner
+    if (bannerEl) {
+      bannerEl.style.display = 'flex';
+      const p = getStrategyParams(btStrategyFilter);
+      const metrics = (state.optimalParams && state.optimalParams[btStrategyFilter] && state.optimalParams[btStrategyFilter].metrics);
+      const evalType = (state.optimalParams && state.optimalParams[btStrategyFilter] && state.optimalParams[btStrategyFilter].evaluation) || 'OOS';
+
+      if (bannerTextEl && p) {
+        const rules = [
+          `MIN P%: ${p.prob}%`,
+          `KELLY MULT: ${p.kelly}`,
+          `KELLY CAP: ${p.kelly_cap}%`,
+          p.max_spread ? `MAX SPREAD: ${p.max_spread}` : null,
+          p.median_ret ? `MIN MEDIAN RET: ${p.median_ret}%` : null,
+          p.max_iv ? `MAX IV: ${p.max_iv}%` : null,
+        ].filter(Boolean).join(' | ');
+        bannerTextEl.innerHTML = `<strong>ACTIVE STRATEGY [${btStrategyFilter.toUpperCase().replace(/_/g, ' ')}]:</strong> ${rules}`;
+      }
+
+      if (bannerMetricsEl && metrics) {
+        bannerMetricsEl.innerHTML = `[${evalType.toUpperCase()}] SHARPE: <strong>${fmt(metrics.sharpe)}</strong> | WIN RATE: <strong>${fmtPct(metrics.win_rate / 100)}</strong> | RETURN: <strong>+${fmt(metrics.total_return)}%</strong>`;
+      } else if (bannerMetricsEl) {
+        bannerMetricsEl.innerHTML = ``;
+      }
+    }
+  } else {
+    const countEl = $('dash-bt-strategy-count');
+    if (countEl) countEl.textContent = '';
+    if (bannerEl) bannerEl.style.display = 'none';
+  }
+
+  // Update Hero Card for top trade matching selected strategy filter
+  const topCard = $('card-top-trade');
+  if (topCard) {
+    const topTrade = trades.length > 0
+      ? trades.reduce((prev, curr) => ((curr.p_success || 0) > (prev.p_success || 0) ? curr : prev), trades[0])
+      : null;
+
+    if (topTrade) {
+      topCard.style.display = 'block';
+      if ($('top-trade-ticker')) $('top-trade-ticker').textContent = topTrade.ticker || '--';
+      if ($('top-trade-prob')) $('top-trade-prob').textContent = topTrade.p_success != null ? (topTrade.p_success * 100).toFixed(1) + '%' : '--';
+      const contract = `${topTrade.ticker} ${topTrade.expiration} ${(topTrade.option_type || '')[0]?.toUpperCase() || ''}${topTrade.strike}`;
+      if ($('top-trade-contract')) $('top-trade-contract').textContent = contract;
+      if ($('top-trade-kelly')) $('top-trade-kelly').textContent = topTrade.kelly_capped != null ? (topTrade.kelly_capped * 100).toFixed(1) + '%' : '--';
+      if ($('top-trade-strategy')) $('top-trade-strategy').textContent = (topTrade.predicted_strategy || '--').replace(/_/g, ' ');
+      if ($('top-trade-date')) $('top-trade-date').textContent = topTrade.timestamp ? topTrade.timestamp.split(' ')[0] : '--';
+
+      const probEl = $('top-trade-prob');
+      if (probEl) {
+        if (topTrade.p_success >= 0.70) probEl.style.color = '#8FA382';
+        else if (topTrade.p_success <= 0.40) probEl.style.color = 'var(--put)';
+        else probEl.style.color = 'var(--accent)';
+      }
+    } else {
+      topCard.style.display = 'none';
+    }
   }
 
   // Sort
@@ -1315,7 +1466,8 @@ function renderOpenTradesTable() {
   });
 
   if (trades.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ NO OPEN POSITIONS FOUND ]</td></tr>`;
+    const stratName = btStrategyFilter !== 'ALL' ? btStrategyFilter.toUpperCase().replace(/_/g, ' ') : 'THIS FILTER';
+    tbody.innerHTML = `<tr><td colspan="12" class="table-empty">[ NO SIGNALS CURRENTLY MEET ENTRY RULES FOR ${stratName} ]</td></tr>`;
     return;
   }
 
@@ -1449,7 +1601,8 @@ function setupEventListeners() {
   $('btn-refresh-all').addEventListener('click', () => refreshAll());
 
   // ML Form & Buttons
-  $('btn-run-labeling')?.addEventListener('click', runLabeling);
+  $('btn-run-labeling')?.addEventListener('click', () => runLabeling(false));
+  $('btn-force-relabel')?.addEventListener('click', () => runLabeling(true));
   $('btn-trigger-retrain')?.addEventListener('click', runRetraining);
   $('btn-save-settings')?.addEventListener('click', saveSettings);
 
@@ -1469,6 +1622,65 @@ function setupEventListeners() {
     }
   });
 
+// ── Optimal params (from scripts/sweep_optimal.json via /api/ml/optimal-params) ──
+// Units: sweep_optimal.json stores all values as fractions (0-1) for thresholds
+// and absolute numbers for things like max_concurrent_trades. The HTML inputs
+// expect prob/kelly_cap/hard_stop/median_ret in percent (×100), kelly/stop_lambda
+// as fractions, max_spread/max_iv as absolute, profit_threshold in percent.
+const FALLBACK_OPT_PARAMS = {
+  'confluence_sniper':          { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 70 },
+  'volatility_regime_adaptive': { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
+  'quantile_spread':            { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 5,  profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
+  'standard':                   { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
+  'directional_quantile_shift': { prob: 40, kelly: 0.80, kelly_cap: 30, stop: 1.5, hard_stop: 3.5, concurrent: 10, profit: 6, median_ret: 4,  max_spread: 0.15, max_iv: 0  },
+};
+
+function mapApiOptimalToFormInputs(params) {
+  if (!params) return null;
+  const pct = (v) => (v == null ? undefined : Math.round(Number(v) * 1000) / 10);
+  const pct2 = (v) => (v == null ? undefined : Math.round(Number(v) * 100));
+  return {
+    prob:        pct2(params.prob_threshold),
+    kelly:       params.kelly_multiplier,
+    kelly_cap:   pct2(params.kelly_cap),
+    stop:        params.stop_lambda,
+    hard_stop:   pct(params.hard_stop_loss),
+    concurrent:  params.max_concurrent_trades,
+    profit:      pct2(params.profit_threshold),
+    median_ret:  pct(params.min_median_return),
+    max_spread:  params.max_quantile_spread,
+    max_iv:      params.max_iv || 0,
+  };
+}
+
+async function loadOptimalParams() {
+  try {
+    const r = await fetch(`${API_BASE}/api/ml/optimal-params`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (data && data.available && data.optimal) {
+      state.optimalParams = data.optimal;
+      state.optimalParamsSource = data.evaluation || 'unknown';
+      console.info(`[optimal-params] loaded ${Object.keys(data.optimal).length} strategies from ${data.path}`);
+    } else {
+      state.optimalParams = null;
+      state.optimalParamsSource = 'unavailable';
+      console.warn('[optimal-params] sweep_optimal.json not found — using fallback (in-sample) values');
+    }
+  } catch (e) {
+    state.optimalParams = null;
+    state.optimalParamsSource = 'unavailable';
+    console.warn(`[optimal-params] fetch failed: ${e.message} — using fallback values`);
+  }
+
+  // Auto-populate form inputs for initial strategy selection
+  const stratEl = $('bt-strategy-type');
+  if (stratEl) {
+    stratEl.dispatchEvent(new Event('change'));
+  }
+}
+
+
   $('bt-strategy-type')?.addEventListener('change', (e) => {
     const val = e.target.value;
     const group1 = $('bt-max-concurrent-group');
@@ -1476,16 +1688,20 @@ function setupEventListeners() {
     if (group1) group1.style.display = 'none';
     if (group2) group2.style.display = 'none';
 
-    // Auto populate optimal parameters per strategy from sweep_v2 optimal results (realistic 7% hard stop loss)
-    const optParamsMap = {
-      'volatility_regime_adaptive': { prob: 40, kelly: 0.55, kelly_cap: 20, stop: 2.0, hard_stop: 7, concurrent: 5, profit: 50, median_ret: 3 },
-      'quantile_spread': { prob: 36, kelly: 0.30, kelly_cap: 20, stop: 2.0, hard_stop: 7, concurrent: 5, max_spread: 4.0, profit: 50, median_ret: 3 },
-      'standard': { prob: 40, kelly: 0.55, kelly_cap: 20, stop: 2.0, hard_stop: 7, concurrent: 5, profit: 50, median_ret: 3 },
-      'directional_quantile_shift': { prob: 35, kelly: 0.50, kelly_cap: 20, hard_stop: 7, concurrent: 5, profit: 50, median_ret: 3 },
-      'aggressive_kelly': { prob: 40, kelly: 1.00, kelly_cap: 30, stop: 1.5, hard_stop: 7, concurrent: 10, profit: 10, median_ret: 3 }
-    };
+    // Show/hide strategy-specific fields
+    document.querySelectorAll('.strategy-field').forEach(field => {
+      const strategies = field.dataset.strategies;
+      if (strategies) {
+        const strategyList = strategies.split(',');
+        field.style.display = strategyList.includes(val) ? 'flex' : 'none';
+      }
+    });
 
-    const p = optParamsMap[val];
+    // Populate the form from the latest sweep_optimal.json served by the backend.
+    // Falls back to a hardcoded map (in-sample-only, not for trading) if the file is missing.
+    const p = (state.optimalParams && state.optimalParams[val] && state.optimalParams[val].params)
+      ? mapApiOptimalToFormInputs(state.optimalParams[val].params)
+      : (FALLBACK_OPT_PARAMS[val] || null);
     if (p) {
       if (p.prob !== undefined && $('bt-prob-threshold')) $('bt-prob-threshold').value = p.prob;
       if (p.kelly !== undefined && $('bt-kelly-multiplier')) {
@@ -1502,6 +1718,7 @@ function setupEventListeners() {
       if (p.max_spread !== undefined && $('bt-max-quantile-spread')) $('bt-max-quantile-spread').value = p.max_spread;
       if (p.profit !== undefined && $('bt-profit-threshold')) $('bt-profit-threshold').value = p.profit;
       if (p.median_ret !== undefined && $('bt-min-median-return')) $('bt-min-median-return').value = p.median_ret;
+      if (p.max_iv !== undefined && $('bt-max-iv')) $('bt-max-iv').value = p.max_iv;
     }
   });
 
@@ -1624,6 +1841,7 @@ function setupEventListeners() {
 
   $('dash-filter-ticker')?.addEventListener('input', renderOpenTradesTable);
   $('dash-filter-strategy')?.addEventListener('change', renderOpenTradesTable);
+  $('dash-filter-bt-strategy')?.addEventListener('change', renderOpenTradesTable);
   $('dash-prob-threshold')?.addEventListener('change', fetchOpenTrades);
   $('dash-min-kelly')?.addEventListener('change', fetchOpenTrades);
 }
@@ -1631,22 +1849,8 @@ function setupEventListeners() {
 // ── Boot Sequence ────────────────────────────────────────────
 (async function boot() {
   const statusEl = $('startup-status-text');
-  
-  state.booting = true;
-  startClock();
-  setupEventListeners();
-  initSidebar();
-  
-  // Disable interactive elements during startup sequence
-  document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
-    el.style.pointerEvents = 'none';
-  });
-  
-  // Resolve initial view
-  handleRouting();
-
-  // Keep track of boot start time to enforce a minimum screen duration of 1.5s for cinematic feel
   const startTime = Date.now();
+  state.booting = true;
 
   // Helper to safely dismiss startup loader overlay and re-enable interactive UI controls
   let loaderDismissed = false;
@@ -1673,14 +1877,48 @@ function setupEventListeners() {
   // Hard safety timeout: Dismiss loader after 3.5 seconds max regardless of network latency
   const hardTimeout = setTimeout(dismissLoader, 3500);
 
+  // Disable interactive elements during startup sequence
+  document.querySelectorAll('button, input, select, .filter-slider').forEach(el => {
+    el.style.pointerEvents = 'none';
+  });
+
+  try {
+    startClock();
+    setupEventListeners();
+    initSidebar();
+  } catch (e) {
+    console.warn('Diagnostics setup exception during boot:', e);
+  }
+
+  try {
+    await loadOptimalParams();
+  } catch (e) {
+    console.warn('Error loading optimal params during boot:', e);
+  }
+
+  // Trigger strategy change to initialize field visibility
+  try {
+    const stratEl = $('bt-strategy-type');
+    if (stratEl) {
+      stratEl.dispatchEvent(new Event('change'));
+    }
+  } catch (e) {
+    console.warn('Error initializing strategy fields:', e);
+  }
+
+  // Resolve initial view
+  try {
+    handleRouting();
+  } catch (e) {
+    console.warn('Routing exception during boot:', e);
+  }
+
   // Step 1: Health Diagnostics
   if (statusEl) statusEl.textContent = 'RUNNING CORE SYSTEM DIAGNOSTICS...';
   
-  // Run checkHealth and wait for it
   let isCoreOnline = false;
   try {
     await checkHealth();
-    // Check state of health dots (online class)
     isCoreOnline = $('status-core')?.classList.contains('online') || $('status-odp')?.classList.contains('online');
   } catch (e) {
     console.warn('Diagnostics exception during boot:', e);
@@ -1733,6 +1971,7 @@ function setupEventListeners() {
   }
 
   // Step 4: Dismiss loading screen animation AFTER all data is loaded in full
+  clearTimeout(hardTimeout);
   dismissLoader();
 
   // Trigger background sync cycle (5 minutes)
@@ -1791,11 +2030,20 @@ function showConfirmModal(onConfirm) {
 async function loadDefaultBacktestCache() {
   if (state.backtestLoading) return;
   state.booting = true;
+  setLoading('backtest-loading', true);
   try {
+    const r = await fetch(`${API_BASE}/api/ml/backtest/default_cache`, { signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      const data = await r.json();
+      loadBacktestData(data);
+      return;
+    }
+    console.warn('Default cache endpoint returned non-OK, running simulation...');
     await runBacktestSimulation();
   } catch (err) {
-    console.error('Failed to run default startup backtest simulation:', err);
+    console.warn('Failed to fetch default backtest cache or run simulation:', err.message);
   } finally {
+    setLoading('backtest-loading', false);
     state.booting = false;
   }
 }
@@ -1806,27 +2054,31 @@ async function runBacktestSimulation(e) {
   
   const mode = $('bt-mode').value;
   const initialCapital = parseFloat($('bt-initial-capital').value) || 100000;
-  const probThreshold = (parseFloat($('bt-prob-threshold').value) || 65) / 100.0;
-  const maxRisk = (parseFloat($('bt-max-risk').value) || 2.0) / 100.0;
-  const trainWindow = parseInt($('bt-train-window').value) || 50;
-  const testIncrement = parseInt($('bt-test-increment').value) || 10;
+  const probThreshold = (parseFloat($('bt-prob-threshold').value) || 40) / 100.0;
+  const maxRisk = (parseFloat($('bt-max-risk').value) || 3.0) / 100.0;
+  const trainWindow = parseInt($('bt-train-window').value) || 500;
+  const testIncrement = parseInt($('bt-test-increment').value) || 100;
   const isSweep = $('bt-sweep-enable').checked;
   const strategyType = $('bt-strategy-type')?.value || 'standard';
-  const maxConcurrentTrades = parseInt($('bt-max-concurrent')?.value) || 3;
+  const maxConcurrentTrades = parseInt($('bt-max-concurrent')?.value) || 10;
   const scanTime = $('bt-scan-time')?.value.trim() || '10:00:00';
   const minKellyFraction = (parseFloat($('bt-min-kelly-fraction')?.value) || 1.0) / 100.0;
-  const hardStopLossRaw = parseFloat($('bt-hard-stop-loss')?.value) || 0.0;
+  const hardStopLossRaw = parseFloat($('bt-hard-stop-loss')?.value) || 3.5;
   const hardStopLoss = hardStopLossRaw > 1.0 ? hardStopLossRaw / 100.0 : hardStopLossRaw;
   const lookbackDaysRaw = parseInt($('bt-lookback-days')?.value) || 0;
   const lookbackDays = lookbackDaysRaw > 0 ? lookbackDaysRaw : null;
   const profitThresholdInput = parseFloat($('bt-profit-threshold')?.value);
-  const profitThreshold = !isNaN(profitThresholdInput) ? (profitThresholdInput > 1.0 ? profitThresholdInput / 100.0 : profitThresholdInput) : null;
+  const profitThreshold = !isNaN(profitThresholdInput) ? (profitThresholdInput > 1.0 ? profitThresholdInput / 100.0 : profitThresholdInput) : 0.06;
   // Strategy-specific params — read from dedicated inputs if they exist, else use optimal defaults
-  const kellyCapRaw = parseFloat($('bt-kelly-cap')?.value) || 20.0;
+  const kellyCapRaw = parseFloat($('bt-kelly-cap')?.value) || 30.0;
   const kellyCap = kellyCapRaw > 1.0 ? kellyCapRaw / 100.0 : kellyCapRaw;
-  const maxQuantileSpread = parseFloat($('bt-max-quantile-spread')?.value) || 4.0;
-  const minMedianReturnRaw = parseFloat($('bt-min-median-return')?.value) || 3.0;
+  const maxQuantileSpread = parseFloat($('bt-max-quantile-spread')?.value) || 0.15;
+  const minMedianReturnRaw = parseFloat($('bt-min-median-return')?.value) || 4.0;
   const minMedianReturn = minMedianReturnRaw > 1.0 ? minMedianReturnRaw / 100.0 : minMedianReturnRaw;
+  const maxIvRaw = parseFloat($('bt-max-iv')?.value) || 70;
+  const maxIv = maxIvRaw > 0 ? maxIvRaw : null;
+  const slippagePctRaw = parseFloat($('bt-slippage-pct')?.value);
+  const slippagePct = !isNaN(slippagePctRaw) ? (slippagePctRaw > 1.0 ? slippagePctRaw / 100.0 : slippagePctRaw) : 0.02;
 
   let confirmDirectDev = false;
   if (mode === 'direct_dev') {
@@ -1896,14 +2148,17 @@ async function runBacktestSimulation(e) {
             lookback_days: lookbackDays,
             profit_threshold: profitThreshold,
             max_quantile_spread: maxQuantileSpread,
-            min_median_return: minMedianReturn
+            min_median_return: minMedianReturn,
+            max_iv: maxIv,
+            slippage_pct: slippagePct
           };
           
           promises.push(
             fetch(`${API_BASE}/api/ml/backtest`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(reqBody)
+              body: JSON.stringify(reqBody),
+              signal: AbortSignal.timeout(60000)
             }).then(async r => {
               const data = await r.json();
               if (!r.ok) throw new Error(data.detail || 'Backtest error');
@@ -1956,13 +2211,16 @@ async function runBacktestSimulation(e) {
         lookback_days: lookbackDays,
         profit_threshold: profitThreshold,
         max_quantile_spread: maxQuantileSpread,
-        min_median_return: minMedianReturn
+        min_median_return: minMedianReturn,
+        max_iv: maxIv,
+        slippage_pct: slippagePct
       };
 
       const r = await fetch(`${API_BASE}/api/ml/backtest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(reqBody)
+        body: JSON.stringify(reqBody),
+        signal: AbortSignal.timeout(60000)
       });
       const data = await r.json();
       if (!r.ok) {
@@ -2313,7 +2571,7 @@ function renderBacktestLedgerTable() {
         <td>${(t.p_success * 100).toFixed(1)}%</td>
         <td>${(t.kelly_fraction * 100).toFixed(1)}%</td>
         <td style="font-family: var(--font-mono);">$${t.position_size_usd.toLocaleString()}</td>
-        <td style="font-family: var(--font-mono);">$${t.stop_price.toFixed(2)}</td>
+        <td style="font-family: var(--font-mono);">${(t.max_adverse_return * 100).toFixed(2)}%</td>
         <td class="${returnClass}" style="font-family: var(--font-mono);">${t.observed_return >= 0 ? '+' : ''}${(t.observed_return * 100).toFixed(2)}%</td>
         <td class="${pnlClass}" style="font-family: var(--font-mono); font-weight: 600;">${t.pnl_usd >= 0 ? '+$' : '-$'}${Math.abs(t.pnl_usd).toLocaleString()}</td>
         <td>${statusBadge}</td>

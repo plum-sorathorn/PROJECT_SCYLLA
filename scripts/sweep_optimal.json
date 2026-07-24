@@ -1,0 +1,43 @@
+{
+  "standard": {
+    "params": {
+      "prob_threshold": 0.4,
+      "kelly_multiplier": 0.8,
+      "kelly_cap": 0.3,
+      "profit_threshold": 0.06,
+      "hard_stop_loss": 0.035,
+      "max_concurrent_trades": 10
+    },
+    "metrics": {
+      "sharpe": 0.9033,
+      "sortino": 0.1456,
+      "cumulative_pnl_pct": 3.0302,
+      "max_drawdown_pct": 0.4441,
+      "win_rate_pct": 71.43,
+      "trades_triggered": 21,
+      "profit_factor": 3.4803
+    },
+    "evaluation": "quick-sweep"
+  },
+  "quantile_spread": {
+    "params": {
+      "prob_threshold": 0.4,
+      "kelly_multiplier": 0.8,
+      "kelly_cap": 0.3,
+      "profit_threshold": 0.05,
+      "hard_stop_loss": 0.035,
+      "max_quantile_spread": 0.15,
+      "max_concurrent_trades": 5
+    },
+    "metrics": {
+      "sharpe": 0.3774,
+      "sortino": 0.0308,
+      "cumulative_pnl_pct": 1.253,
+      "max_drawdown_pct": 0.6605,
+      "win_rate_pct": 78.57,
+      "trades_triggered": 14,
+      "profit_factor": 1.7587
+    },
+    "evaluation": "quick-sweep"
+  }
+}

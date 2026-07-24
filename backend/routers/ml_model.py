@@ -11,18 +11,39 @@ import pickle
 import joblib
 import lightgbm as lgb
 import logging
-from .ml_derivations import compute_calibrated_p_success, classify_strategy, kelly_fraction
+from .ml_derivations import compute_calibrated_p_success, classify_strategy, kelly_fraction, kelly_fraction_realized
 
 import threading
 import concurrent.futures
+import math
+
 logger = logging.getLogger("scylla.ml_model")
 router = APIRouter()
+
+def _sanitize_float_values(obj):
+    """Recursively converts NaN, Infinity, -Infinity floats to None for standard JSON compliance."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_float_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_float_values(v) for v in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, np.generic):
+        val = obj.item()
+        if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+            return None
+        return val
+    return obj
 
 
 # Paths relative to the backend directory
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../scylla_ml.db"))
 CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../cache"))
 MODEL_PATH = os.path.join(CACHE_DIR, "scylla_predictor.pkl")
+
+LABELING_VERSION = "v2_settlement"
 
 # ── In-memory caches for expensive market data lookups ───────
 _hv_cache = {}   # ticker -> annualized HV
@@ -95,6 +116,8 @@ class PredictResponseSchema(BaseModel):
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    # Enable WAL mode for better concurrency (allows reads during writes)
+    conn.execute("PRAGMA journal_mode=WAL")
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS options_trades (
@@ -395,12 +418,32 @@ def api_get_model_runs(limit: int = 50):
 
 
 # ═══════════════════════════════════════════════════════════════
+# DATABASE HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+def _execute_with_retry(func, max_retries=5, initial_delay=0.1):
+    """Execute a database operation with retry logic for SQLite locking."""
+    import time
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+            else:
+                raise
+    raise sqlite3.OperationalError("Max retries exceeded")
+
+
+# ═══════════════════════════════════════════════════════════════
 # TRADE LOGGING
 # ═══════════════════════════════════════════════════════════════
 
 @router.post("/ml/log-trade")
 def api_log_trade(trade: TradeSchema):
-    try:
+    def _log_trade():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
@@ -442,6 +485,9 @@ def api_log_trade(trade: TradeSchema):
         conn.commit()
         conn.close()
         return {"status": "success", "message": f"Logged trade for {trade.ticker}"}
+    
+    try:
+        return _execute_with_retry(_log_trade)
     except Exception as e:
         logger.error(f"Failed to log trade: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -634,7 +680,7 @@ def api_get_open_trades(
                         max_p_success = t['p_success']
                         highest_prob_trade = t
                 
-        return {"data": filtered_trades, "count": len(filtered_trades), "highest_probability": highest_prob_trade}
+        return _sanitize_float_values({"data": filtered_trades, "count": len(filtered_trades), "highest_probability": highest_prob_trade})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -778,11 +824,13 @@ def api_get_trades(
 @router.post("/ml/label")
 def api_label_trades(
     horizon_days: Optional[int] = Query(default=None),
-    profit_threshold: Optional[float] = Query(default=None)
+    profit_threshold: Optional[float] = Query(default=None),
+    force: Optional[bool] = Query(default=False, description="Force re-label all trades (resets existing labels)")
 ):
     """Triggers the labeling process for pending trades.
     Uses configured settings from ml_settings table as defaults,
     but query params override if provided.
+    Set force=true to re-label all trades (useful after labeling logic changes).
     """
     try:
         # Read defaults from settings table
@@ -792,6 +840,11 @@ def api_label_trades(
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        if force:
+            cursor.execute("UPDATE options_trades SET labeled = 0, label_success = NULL, observed_return = NULL, max_adverse_return = NULL, evaluation_date = NULL WHERE is_synthetic = 0")
+            conn.commit()
+            logger.info(f"Force re-label: reset all trade labels")
         
         time_limit = (datetime.datetime.now() - datetime.timedelta(days=effective_horizon)).strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("""
@@ -804,64 +857,77 @@ def api_label_trades(
         if not pending:
             conn.close()
             return {"labeled_count": 0, "message": "No pending trades match the horizon criteria."}
-            
-        labeled_count = 0
+        
+        from collections import defaultdict
+        trades_by_ticker = defaultdict(list)
         for row in pending:
             trade_id, timestamp_str, ticker, option_type, start_price, side = row
-            trade_date = datetime.datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").date()
-            end_date = trade_date + datetime.timedelta(days=effective_horizon)
-            
+            trades_by_ticker[ticker].append((trade_id, timestamp_str, option_type, start_price, side))
+        
+        labeled_count = 0
+        for ticker, ticker_trades in trades_by_ticker.items():
             try:
+                dates = [datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").date() for _, ts, _, _, _ in ticker_trades]
+                min_date = min(dates)
+                max_date = max(dates) + datetime.timedelta(days=effective_horizon + 2)
+                
                 tk = yf.Ticker(ticker)
-                hist = tk.history(start=trade_date.strftime("%Y-%m-%d"), 
-                                  end=(end_date + datetime.timedelta(days=2)).strftime("%Y-%m-%d"))
+                hist = tk.history(start=min_date.strftime("%Y-%m-%d"), 
+                                  end=max_date.strftime("%Y-%m-%d"))
                 
                 if hist.empty:
                     continue
-                    
-                hist = hist.loc[trade_date.strftime("%Y-%m-%d"):end_date.strftime("%Y-%m-%d")]
-                if hist.empty:
-                    continue
-                    
-                prices = hist['Close'].values
-                is_bullish = (option_type == "Call" and side == "BUY") or (option_type == "Put" and side == "SELL")
                 
-                success = 0
-                continuous_favorable_return = 0.0
-                max_adverse_return = 0.0
+                hist.index = hist.index.date
                 
-                if len(prices) > 0:
-                    max_price = np.max(prices)
-                    min_price = np.min(prices)
+                for trade_id, timestamp_str, option_type, start_price, side in ticker_trades:
+                    trade_date = datetime.datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").date()
+                    end_date = trade_date + datetime.timedelta(days=effective_horizon)
                     
-                    if is_bullish:
-                        continuous_favorable_return = (max_price - start_price) / start_price
-                        max_adverse_return = (min_price - start_price) / start_price
-                    else:
-                        continuous_favorable_return = (start_price - min_price) / start_price
-                        max_adverse_return = (start_price - max_price) / start_price
+                    trade_hist = hist.loc[trade_date:end_date]
+                    if trade_hist.empty:
+                        continue
                     
-                    if continuous_favorable_return >= effective_threshold:
-                        success = 1
-                
-                cursor.execute("""
-                    UPDATE options_trades
-                    SET labeled = 1,
-                        label_success = ?,
-                        observed_return = ?,
-                        max_adverse_return = ?,
-                        evaluation_date = ?
-                    WHERE id = ?
-                """, (success, 
-                      round(float(continuous_favorable_return), 4), 
-                      round(float(max_adverse_return), 4), 
-                      end_date.strftime("%Y-%m-%d"), 
-                      trade_id))
-                conn.commit()
-                labeled_count += 1
-                
+                    prices = trade_hist['Close'].values
+                    is_bullish = (option_type == "Call" and side == "BUY") or (option_type == "Put" and side == "SELL")
+                    
+                    success = 0
+                    continuous_favorable_return = 0.0
+                    max_adverse_return = 0.0
+                    
+                    if len(prices) > 0:
+                        settlement_price = prices[-1]
+                        min_price = np.min(prices)
+                        max_price = np.max(prices)
+                        
+                        if is_bullish:
+                            continuous_favorable_return = (settlement_price - start_price) / start_price
+                            max_adverse_return = (min_price - start_price) / start_price
+                        else:
+                            continuous_favorable_return = (start_price - settlement_price) / start_price
+                            max_adverse_return = (start_price - max_price) / start_price
+                        
+                        if continuous_favorable_return >= effective_threshold:
+                            success = 1
+                    
+                    cursor.execute("""
+                        UPDATE options_trades
+                        SET labeled = 1,
+                            label_success = ?,
+                            observed_return = ?,
+                            max_adverse_return = ?,
+                            evaluation_date = ?
+                        WHERE id = ?
+                    """, (success, 
+                          round(float(continuous_favorable_return), 4), 
+                          round(float(max_adverse_return), 4), 
+                          end_date.strftime("%Y-%m-%d"), 
+                          trade_id))
+                    conn.commit()
+                    labeled_count += 1
+                    
             except Exception as ex:
-                logger.warning(f"Error labeling trade {trade_id}: {ex}")
+                logger.warning(f"Error labeling trades for ticker {ticker}: {ex}")
                 continue
                 
         conn.close()
@@ -1420,24 +1486,28 @@ def get_real_trades(conn, **filters) -> pd.DataFrame:
 class BacktestRequestSchema(BaseModel):
     mode: Optional[str] = "walkforward"
     initial_capital: Optional[float] = 100000.0
-    prob_threshold: Optional[float] = 0.36
-    kelly_multiplier: Optional[float] = 0.30
-    kelly_cap: Optional[float] = 0.20
-    stop_lambda: Optional[float] = 2.0
-    max_risk_pct_per_trade: Optional[float] = 0.02
+    prob_threshold: Optional[float] = 0.40
+    kelly_multiplier: Optional[float] = 0.80
+    kelly_cap: Optional[float] = 0.30
+    stop_lambda: Optional[float] = 1.5
+    max_risk_pct_per_trade: Optional[float] = 0.03
     walkforward_train_window: Optional[int] = 500
     walkforward_test_increment: Optional[int] = 100
     confirm_direct_dev: Optional[bool] = False
-    strategy_type: Optional[str] = "quantile_spread"
-    max_concurrent_trades: Optional[int] = 5
+    strategy_type: Optional[str] = "standard"
+    max_concurrent_trades: Optional[int] = 10
     scan_time: Optional[str] = "10:00:00"
     min_kelly_fraction: Optional[float] = 0.01
-    hard_stop_loss: Optional[float] = 0.07
-    lookback_days: Optional[int] = None  # None = use all data; otherwise limit to last N calendar days
-    profit_threshold: Optional[float] = 0.50
-    max_quantile_spread: Optional[float] = 4.0
-    min_median_return: Optional[float] = 0.03
-    slippage_pct: Optional[float] = 0.005
+    hard_stop_loss: Optional[float] = 0.035
+    lookback_days: Optional[int] = None
+    profit_threshold: Optional[float] = 0.06
+    max_quantile_spread: Optional[float] = 0.15
+    min_median_return: Optional[float] = 0.04
+    slippage_pct: Optional[float] = 0.02
+    max_iv: Optional[float] = 70.0
+    min_open_interest: Optional[int] = 0
+    data_start_idx: Optional[int] = None
+    data_end_idx: Optional[int] = None
 
 
 def _process_walkforward_step(T_start, T_end, df_real, profit_threshold, n_estimators=200, learning_rate=0.025, min_child_samples=15):
@@ -1492,8 +1562,8 @@ def _process_walkforward_step(T_start, T_end, df_real, profit_threshold, n_estim
                 num_leaves=20,
                 min_child_samples=min_child_samples,
                 random_state=42,
-                n_jobs=2,  # Multi-threading per LightGBM model (Option 3)
-                verbose=-1
+                verbose=-1,
+                n_jobs=4
             ))
         ])
         pipe.fit(X_train, y_train)
@@ -1555,21 +1625,32 @@ def api_backtest(req: BacktestRequestSchema):
         f"{req.kelly_cap}_{req.stop_lambda}_{req.max_risk_pct_per_trade}_{req.walkforward_train_window}_"
         f"{req.walkforward_test_increment}_{req.strategy_type}_{req.max_concurrent_trades}_"
         f"{req.scan_time}_{req.min_kelly_fraction}_{req.hard_stop_loss}_{req.lookback_days}_"
-        f"{req.profit_threshold}_{req.max_quantile_spread}_{req.min_median_return}_{req.slippage_pct}"
+        f"{req.profit_threshold}_{req.max_quantile_spread}_{req.min_median_return}_{req.slippage_pct}_{req.max_iv}_{req.min_open_interest}"
+        f"_{req.data_start_idx}_{req.data_end_idx}"
     )
     if cache_key_resp in _backtest_response_cache:
         print(f"api_backtest: returning cached response for key {cache_key_resp}")
         return _backtest_response_cache[cache_key_resp]
 
     # Fetch settings/thresholds
+    # NOTE: profit_threshold here is the BACKTEST profit cap (the +X% return at which a winning trade
+    # is closed). This is intentionally decoupled from the ml_settings.profit_threshold DB value, which
+    # is the ML training label threshold (the return above which a trade is labelled "successful" for
+    # supervised learning). They serve different purposes and intentionally do not share a default.
     settings = _get_settings()
-    profit_threshold = req.profit_threshold if req.profit_threshold is not None else float(settings.get("profit_threshold", "0.03"))
+    profit_threshold = req.profit_threshold if req.profit_threshold is not None else 1.00
     horizon_days = int(settings.get("horizon_days", "10"))
 
     conn = sqlite3.connect(DB_PATH)
-    # Pull all is_synthetic=0 rows chronologically via get_real_trades
     df_real = get_real_trades(conn, labeled=1)
     conn.close()
+
+    if req.data_start_idx is not None or req.data_end_idx is not None:
+        start = req.data_start_idx if req.data_start_idx is not None else 0
+        end = req.data_end_idx if req.data_end_idx is not None else len(df_real)
+        end = min(end, len(df_real))
+        start = max(0, min(start, end))
+        df_real = df_real.iloc[start:end].reset_index(drop=True)
 
     N = len(df_real)
 
@@ -1586,7 +1667,7 @@ def api_backtest(req: BacktestRequestSchema):
 
         import joblib
         import os
-        cache_key = f"{train_window}_{increment}_{N}_{profit_threshold}"
+        cache_key = f"{LABELING_VERSION}_{train_window}_{increment}_{N}_{profit_threshold}_{req.data_start_idx}_{req.data_end_idx}"
         cache_file = os.path.join(CACHE_DIR, f"cache_predictions_walkforward_{cache_key}.pkl")
         legacy_cache_file = os.path.join(CACHE_DIR, "cache_predictions_walkforward.pkl")
         
@@ -1709,7 +1790,9 @@ def api_backtest(req: BacktestRequestSchema):
     hard_stop_loss = _raw_hsl if _raw_hsl <= 1.0 else _raw_hsl / 100.0
     max_quantile_spread = req.max_quantile_spread or 0.40
     min_median_return = req.min_median_return or 0.03
-    slippage_pct = req.slippage_pct if req.slippage_pct is not None else 0.005
+    slippage_pct = req.slippage_pct if req.slippage_pct is not None else 0.01
+    max_iv = req.max_iv
+    min_open_interest = req.min_open_interest if req.min_open_interest is not None else 0
 
     # Apply lookback_days filter on pre-computed predictions
     if req.lookback_days is not None and req.lookback_days > 0 and predictions:
@@ -1804,31 +1887,55 @@ def api_backtest(req: BacktestRequestSchema):
                     cur_kelly_cap = min(kelly_cap, 0.15)
                 if p_success >= cur_prob_threshold:
                     is_eligible = True
+            elif strategy_type == "confluence_sniper":
+                trend = str(row.get("trend_alignment", ""))
+                opt_t = str(row.get("option_type", ""))
+                side = str(row.get("side", ""))
+                iv = float(row.get("implied_vol", 30))
+                iqr = q_preds["p90"] - q_preds["p10"]
+                is_put_sell_bull_neutral = (opt_t == "Put" and side == "SELL" and trend in ("BULL_ALIGNED", "NEUTRAL"))
+                is_call_buy_bear_neutral = (opt_t == "Call" and side == "BUY" and trend in ("BEAR_ALIGNED", "NEUTRAL"))
+                regime_ok = is_put_sell_bull_neutral or is_call_buy_bear_neutral
+                iv_ok = (max_iv is None or iv <= max_iv)
+                iqr_ok = (iqr <= max_quantile_spread)
+                median_ok = (q_preds["p50"] >= min_median_return)
+                prob_ok = (p_success >= cur_prob_threshold)
+                if regime_ok and iv_ok and iqr_ok and median_ok and prob_ok:
+                    is_eligible = True
             else:
                 # Default / Standard / Conservative / Aggressive strategies
                 if p_success >= cur_prob_threshold:
                     is_eligible = True
 
             if is_eligible:
+                # Liquidity filter: skip illiquid contracts unless caller opts in
+                row_oi = row.get('open_interest')
+                if min_open_interest > 0 and (row_oi is None or int(row_oi) < min_open_interest):
+                    continue
+
                 p10_pred = q_preds["p10"]
                 p50_pred = q_preds["p50"]
                 p90_pred = q_preds["p90"]
 
-                kelly_fraction_raw, _ = kelly_fraction(p_success, p50_pred, p10_pred, p90_pred)
-                kelly_fraction_final = min(kelly_fraction_raw * kelly_multiplier, cur_kelly_cap)
-
-                underlier_entry = float(row['underlier_price'])
+                # Determine realized payoff structure (cap / stop) for this trade
                 if hard_stop_loss > 0.0:
                     option_risk = hard_stop_loss
-                    stop_price = underlier_entry * (1.0 - option_risk * 0.1)
                 else:
                     option_risk = abs(p10_pred * stop_lambda)
-                    if option_risk > 1.0: option_risk = 1.0
-                    stop_price = underlier_entry * (1.0 - option_risk * 0.1)
+                    if option_risk > 1.0:
+                        option_risk = 1.0
+                effective_upside = max(profit_threshold, 0.01)
+                effective_stop = max(option_risk, 0.01)
 
-                if option_risk > 0:
-                    if kelly_fraction_final * option_risk > max_risk_pct_per_trade:
-                        kelly_fraction_final = max_risk_pct_per_trade / option_risk
+                # Size on REALIZED payoff (cap / stop), not on quantile tails.
+                # This prevents over-sizing when the cap clips the model's predicted upside.
+                kelly_fraction_raw, _ = kelly_fraction_realized(
+                    p_success, effective_upside, effective_stop, kelly_cap=cur_kelly_cap
+                )
+                kelly_fraction_final = min(kelly_fraction_raw * kelly_multiplier, cur_kelly_cap)
+
+                if kelly_fraction_final * effective_stop > max_risk_pct_per_trade:
+                    kelly_fraction_final = max_risk_pct_per_trade / effective_stop
 
                 if kelly_fraction_final < min_kelly_fraction:
                     continue
@@ -1842,11 +1949,12 @@ def api_backtest(req: BacktestRequestSchema):
 
                 available_capital -= position_size_usd
 
-                max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
                 observed_return = float(row['observed_return']) if row['observed_return'] is not None else 0.0
+                max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
 
-                effective_stop = option_risk
-
+                # Intraday stop-loss: use max_adverse_return (worst drawdown during trade life)
+                # to detect if the stop threshold was breached intra-trade, even if the trade
+                # recovered by settlement. max_adverse_return is negative (e.g. -0.30 = -30%).
                 if max_adverse_return <= -effective_stop:
                     exit_reason = "stop_hit"
                     trade_return = -effective_stop
@@ -1874,7 +1982,7 @@ def api_backtest(req: BacktestRequestSchema):
                     "p_success": round(p_success, 4),
                     "kelly_fraction": round(kelly_fraction_final, 4),
                     "position_size_usd": round(position_size_usd, 2),
-                    "stop_price": round(stop_price, 2),
+                    "max_adverse_return": round(max_adverse_return, 4),
                     "exit_reason": exit_reason,
                     "observed_return": round(trade_return, 4),
                     "pnl_usd": round(pnl_usd, 2)
@@ -1907,7 +2015,7 @@ def api_backtest(req: BacktestRequestSchema):
     if len(daily_returns) > 1:
         mean_return = float(np.mean(daily_returns))
         std_return = float(np.std(daily_returns, ddof=1))
-        annualization_factor = np.sqrt(365.0)
+        annualization_factor = np.sqrt(252.0)
         sharpe = (mean_return / std_return) * annualization_factor if std_return > 0 else 0.0
 
         neg_returns = [r for r in daily_returns if r < 0]
@@ -1962,6 +2070,9 @@ def api_backtest(req: BacktestRequestSchema):
         warnings.append("in-sample: indicative only, not valid for strategy validation")
     warnings.append("settlement-based: Sharpe/Sortino computed on settlement-day returns only — intra-trade mark-to-market risk is not captured")
     warnings.append("vix_hv_lookforward: VIX and HV features use current market values applied to all historical rows — mild look-ahead bias")
+    warnings.append(f"slippage: flat {slippage_pct*100:.1f}% per-trade slippage applied; real bid-ask spread varies with IV/moneyness")
+    if len(transactions) < 30:
+        warnings.append(f"small-sample: only {len(transactions)} trades — results are not statistically significant (need 30+ for reliable estimates)")
 
     summary = {
         "cumulative_pnl_usd": round(float(cumulative_pnl_usd), 2),
@@ -1986,7 +2097,7 @@ def api_backtest(req: BacktestRequestSchema):
         "transactions": transactions,
         "summary": summary,
         "warnings": warnings,
-        "path_resolution_note": "stop vs profit ordering inferred conservatively from summary MAE/return, not full price path"
+        "path_resolution_note": "settlement-based exits only — no intra-trade MAE look-ahead. Trades are exited at observed_return vs (profit cap, hard stop) at settlement; intra-trade price path is unknown."
     }
     _backtest_response_cache[cache_key_resp] = res_payload
     return res_payload
@@ -1994,62 +2105,151 @@ def api_backtest(req: BacktestRequestSchema):
 
 BOOT_CACHE_PATH = os.path.join(CACHE_DIR, "boot_backtest_cache.pkl")
 
+SWEEP_OPTIMAL_PATHS = [
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts", "sweep_optimal.json"),
+    os.path.join(CACHE_DIR, "sweep_optimal.json"),
+]
+
+
+def _read_sweep_optimal():
+    for p in SWEEP_OPTIMAL_PATHS:
+        try:
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f), p
+        except Exception as ex:
+            logger.warning(f"Failed to read sweep_optimal at {p}: {ex}")
+    return None, None
+
+
+@router.get("/ml/optimal-params")
+def api_get_optimal_params():
+    """Returns the latest sweep_optimal.json written by the parameter sweep script.
+    Powers the strategy-type dropdown auto-population in the frontend.
+    """
+    data, path = _read_sweep_optimal()
+    if data is None:
+        return {
+            "available": False,
+            "message": "sweep_optimal.json not found. Run scripts/sweep_oos.py to generate it.",
+            "optimal": None,
+        }
+    return {
+        "available": True,
+        "path": path,
+        "mtime": os.path.getmtime(path),
+        "optimal": data,
+    }
+
 
 @router.get("/ml/backtest/default_cache")
 def api_get_default_backtest_cache():
-    """Returns cached backtest results for the #1 ranked default strategy (quantile_spread)
-    with its optimal validated parameters for instant app boot rendering. Loads from disk in < 50ms.
+    """Returns cached backtest results for the top-ranked strategy
+    with its optimal validated parameters from sweep_optimal.json for instant app boot rendering. Loads from disk in < 50ms.
     """
     model_mtime = str(os.path.getmtime(MODEL_PATH)) if os.path.exists(MODEL_PATH) else "no_model"
-    
+    sweep_data, sweep_path = _read_sweep_optimal()
+    sweep_mtime = str(os.path.getmtime(sweep_path)) if (sweep_path and os.path.exists(sweep_path)) else "no_sweep"
+    cache_version = f"{model_mtime}_{sweep_mtime}"
+
     if os.path.exists(BOOT_CACHE_PATH):
         try:
             cached_payload = joblib.load(BOOT_CACHE_PATH)
-            if isinstance(cached_payload, dict) and cached_payload.get("model_version") == model_mtime:
+            if isinstance(cached_payload, dict) and cached_payload.get("model_version") == cache_version:
                 return cached_payload["data"]
         except Exception as ex:
             logger.warning(f"Failed to load BOOT_CACHE_PATH: {ex}")
 
+    # Determine top strategy and params from sweep_optimal.json if available
+    strat_type = "quantile_spread"
+    opt_params = {
+        "prob_threshold": 0.55,
+        "kelly_multiplier": 0.60,
+        "kelly_cap": 0.15,
+        "stop_lambda": 2.0,
+        "hard_stop_loss": 0.07,
+        "profit_threshold": 1.00,
+        "max_quantile_spread": 5.5,
+        "min_median_return": 0.05,
+        "max_concurrent_trades": 10,
+        "max_iv": 0.0
+    }
+    eval_type = "in-sample"
+
+    if sweep_data and isinstance(sweep_data, dict):
+        best_strat = None
+        best_sharpe = -999.0
+        for st_name, st_info in sweep_data.items():
+            if isinstance(st_info, dict) and "metrics" in st_info and "params" in st_info:
+                sharpe = float(st_info["metrics"].get("sharpe", -999.0))
+                if sharpe > best_sharpe:
+                    best_sharpe = sharpe
+                    best_strat = (st_name, st_info)
+        
+        if best_strat:
+            st_name, st_info = best_strat
+            strat_type = st_name
+            p = st_info.get("params", {})
+            eval_type = st_info.get("evaluation", "unknown")
+            opt_params = {
+                "prob_threshold": p.get("prob_threshold", 0.55),
+                "kelly_multiplier": p.get("kelly_multiplier", 0.50),
+                "kelly_cap": p.get("kelly_cap", 0.20),
+                "stop_lambda": p.get("stop_lambda", 1.5),
+                "hard_stop_loss": p.get("hard_stop_loss", 0.07),
+                "profit_threshold": p.get("profit_threshold", 1.00),
+                "max_quantile_spread": p.get("max_quantile_spread", 5.0),
+                "min_median_return": p.get("min_median_return", 0.03),
+                "max_concurrent_trades": int(p.get("max_concurrent_trades", 10)),
+                "max_iv": p.get("max_iv", 0.0)
+            }
+
     default_req = BacktestRequestSchema(
         mode="walkforward",
-        strategy_type="quantile_spread",
-        prob_threshold=0.35,
-        kelly_multiplier=0.70,
-        kelly_cap=0.20,
-        stop_lambda=2.0,
-        hard_stop_loss=0.07,
-        profit_threshold=0.50,
-        max_quantile_spread=4.0,
-        min_median_return=0.03,
-        max_concurrent_trades=5,
+        strategy_type=strat_type,
+        prob_threshold=opt_params["prob_threshold"],
+        kelly_multiplier=opt_params["kelly_multiplier"],
+        kelly_cap=opt_params["kelly_cap"],
+        stop_lambda=opt_params.get("stop_lambda", 1.5),
+        hard_stop_loss=opt_params["hard_stop_loss"],
+        profit_threshold=opt_params["profit_threshold"],
+        max_quantile_spread=opt_params["max_quantile_spread"],
+        min_median_return=opt_params["min_median_return"],
+        max_concurrent_trades=opt_params["max_concurrent_trades"],
         walkforward_train_window=500,
         walkforward_test_increment=100,
-        slippage_pct=0.005,
-        initial_capital=100000.0
+        slippage_pct=0.02,
+        initial_capital=100000.0,
+        max_iv=opt_params["max_iv"]
     )
-    res = api_backtest(default_req)
-    
+    try:
+        res = api_backtest(default_req)
+    except HTTPException as e:
+        if e.status_code == 422:
+            return {
+                "error": "insufficient_data",
+                "message": f"Not enough labeled trades to run backtest. Please complete the labeling process first. ({e.detail})",
+                "summary": {
+                    "cumulative_pnl_pct": 0,
+                    "cumulative_pnl_usd": 0,
+                    "trades_triggered": 0,
+                    "trades_total_available": 0
+                }
+            }
+        raise
+
     res_copy = dict(res)
     res_copy["cache_metadata"] = {
         "cached_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "strategy_name": "Quantile Spread Filter (Optimal #1 Default)",
-        "optimal_params": {
-            "prob_threshold": 0.35,
-            "kelly_multiplier": 0.70,
-            "kelly_cap": 0.20,
-            "stop_lambda": 2.0,
-            "hard_stop_loss": 0.07,
-            "profit_threshold": 0.50,
-            "max_quantile_spread": 4.0,
-            "min_median_return": 0.03,
-            "max_concurrent_trades": 5
-        },
-        "model_version": model_mtime,
+        "strategy_name": f"{strat_type} ({eval_type.upper()} Optimal Default)",
+        "evaluation": eval_type,
+        "optimal_params": opt_params,
+        "model_version": cache_version,
         "is_stale": False
     }
 
     try:
-        joblib.dump({"model_version": model_mtime, "data": res_copy}, BOOT_CACHE_PATH)
+        joblib.dump({"model_version": cache_version, "data": res_copy}, BOOT_CACHE_PATH)
     except Exception as ex:
         logger.warning(f"Failed to save BOOT_CACHE_PATH: {ex}")
 

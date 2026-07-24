@@ -1,0 +1,73 @@
+{
+  "_comment": "Consolidated default parameters for all strategies. Frontend and backend should reference this file to stay in sync.",
+  "_updated": "2026-07-24",
+  "_notes": "Parameters calibrated for settlement-based underlier returns. Optimal values from sweep_quick.py results.",
+  
+  "common": {
+    "mode": "walkforward",
+    "initial_capital": 100000.0,
+    "walkforward_train_window": 500,
+    "walkforward_test_increment": 100,
+    "profit_threshold": 0.06,
+    "min_kelly_fraction": 0.01,
+    "slippage_pct": 0.02,
+    "lookback_days": null,
+    "min_open_interest": 0,
+    "scan_time": "10:00:00",
+    "max_risk_pct_per_trade": 0.03
+  },
+  
+  "strategies": {
+    "standard": {
+      "strategy_type": "standard",
+      "prob_threshold": 0.40,
+      "kelly_multiplier": 0.80,
+      "kelly_cap": 0.30,
+      "hard_stop_loss": 0.035,
+      "stop_lambda": 1.5,
+      "max_concurrent_trades": 10
+    },
+    
+    "quantile_spread": {
+      "strategy_type": "quantile_spread",
+      "prob_threshold": 0.40,
+      "kelly_multiplier": 0.80,
+      "kelly_cap": 0.30,
+      "hard_stop_loss": 0.035,
+      "max_quantile_spread": 0.15,
+      "min_median_return": 0.04,
+      "max_concurrent_trades": 5
+    },
+    
+    "directional_quantile_shift": {
+      "strategy_type": "directional_quantile_shift",
+      "prob_threshold": 0.40,
+      "kelly_multiplier": 0.80,
+      "kelly_cap": 0.30,
+      "hard_stop_loss": 0.035,
+      "min_median_return": 0.04,
+      "max_concurrent_trades": 10
+    },
+    
+    "volatility_regime_adaptive": {
+      "strategy_type": "volatility_regime_adaptive",
+      "prob_threshold": 0.40,
+      "kelly_multiplier": 0.80,
+      "kelly_cap": 0.30,
+      "hard_stop_loss": 0.035,
+      "max_concurrent_trades": 10
+    },
+    
+    "confluence_sniper": {
+      "strategy_type": "confluence_sniper",
+      "prob_threshold": 0.40,
+      "kelly_multiplier": 0.80,
+      "kelly_cap": 0.30,
+      "hard_stop_loss": 0.035,
+      "max_quantile_spread": 0.15,
+      "min_median_return": 0.04,
+      "max_iv": 70.0,
+      "max_concurrent_trades": 10
+    }
+  }
+}
