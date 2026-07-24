@@ -2032,7 +2032,7 @@ async function loadDefaultBacktestCache() {
   state.booting = true;
   setLoading('backtest-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/ml/backtest/default_cache`, { signal: AbortSignal.timeout(5000) });
+    const r = await fetch(`${API_BASE}/api/ml/backtest/default_cache`);
     if (r.ok) {
       const data = await r.json();
       loadBacktestData(data);
@@ -2157,8 +2157,7 @@ async function runBacktestSimulation(e) {
             fetch(`${API_BASE}/api/ml/backtest`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(reqBody),
-              signal: AbortSignal.timeout(60000)
+              body: JSON.stringify(reqBody)
             }).then(async r => {
               const data = await r.json();
               if (!r.ok) throw new Error(data.detail || 'Backtest error');
@@ -2219,8 +2218,7 @@ async function runBacktestSimulation(e) {
       const r = await fetch(`${API_BASE}/api/ml/backtest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(reqBody),
-        signal: AbortSignal.timeout(60000)
+        body: JSON.stringify(reqBody)
       });
       const data = await r.json();
       if (!r.ok) {

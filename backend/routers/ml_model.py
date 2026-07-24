@@ -1486,7 +1486,10 @@ def get_real_trades(conn, **filters) -> pd.DataFrame:
 class BacktestRequestSchema(BaseModel):
     mode: Optional[str] = "walkforward"
     initial_capital: Optional[float] = 100000.0
-    prob_threshold: Optional[float] = 0.40
+    # Probability calibration target used to map predicted return distribution -> p_success.
+    # Decoupled from profit_threshold (take-profit cap) to avoid circular over-restriction.
+    calibration_target_pct: Optional[float] = 0.025
+    prob_threshold: Optional[float] = 0.35
     kelly_multiplier: Optional[float] = 0.80
     kelly_cap: Optional[float] = 0.30
     stop_lambda: Optional[float] = 1.5
@@ -1497,20 +1500,20 @@ class BacktestRequestSchema(BaseModel):
     strategy_type: Optional[str] = "standard"
     max_concurrent_trades: Optional[int] = 10
     scan_time: Optional[str] = "10:00:00"
-    min_kelly_fraction: Optional[float] = 0.01
-    hard_stop_loss: Optional[float] = 0.035
+    min_kelly_fraction: Optional[float] = 0.005
+    hard_stop_loss: Optional[float] = 0.06
     lookback_days: Optional[int] = None
-    profit_threshold: Optional[float] = 0.06
-    max_quantile_spread: Optional[float] = 0.15
-    min_median_return: Optional[float] = 0.04
-    slippage_pct: Optional[float] = 0.02
-    max_iv: Optional[float] = 70.0
+    profit_threshold: Optional[float] = 0.08
+    max_quantile_spread: Optional[float] = 0.35
+    min_median_return: Optional[float] = 0.015
+    slippage_pct: Optional[float] = 0.01
+    max_iv: Optional[float] = 120.0
     min_open_interest: Optional[int] = 0
     data_start_idx: Optional[int] = None
     data_end_idx: Optional[int] = None
 
 
-def _process_walkforward_step(T_start, T_end, df_real, profit_threshold, n_estimators=200, learning_rate=0.025, min_child_samples=15):
+def _process_walkforward_step(T_start, T_end, df_real, profit_threshold, calibration_target_pct=0.025, n_estimators=200, learning_rate=0.025, min_child_samples=15):
     from sklearn.pipeline import Pipeline
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -1589,7 +1592,7 @@ def _process_walkforward_step(T_start, T_end, df_real, profit_threshold, n_estim
         }
         q_preds = enforce_monotonic_quantiles(q_preds)
         p_success = compute_calibrated_p_success(
-            profit_threshold,
+            calibration_target_pct,
             q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
         )
         step_preds.append({
@@ -1625,7 +1628,7 @@ def api_backtest(req: BacktestRequestSchema):
         f"{req.kelly_cap}_{req.stop_lambda}_{req.max_risk_pct_per_trade}_{req.walkforward_train_window}_"
         f"{req.walkforward_test_increment}_{req.strategy_type}_{req.max_concurrent_trades}_"
         f"{req.scan_time}_{req.min_kelly_fraction}_{req.hard_stop_loss}_{req.lookback_days}_"
-        f"{req.profit_threshold}_{req.max_quantile_spread}_{req.min_median_return}_{req.slippage_pct}_{req.max_iv}_{req.min_open_interest}"
+        f"{req.profit_threshold}_{req.calibration_target_pct}_{req.max_quantile_spread}_{req.min_median_return}_{req.slippage_pct}_{req.max_iv}_{req.min_open_interest}"
         f"_{req.data_start_idx}_{req.data_end_idx}"
     )
     if cache_key_resp in _backtest_response_cache:
@@ -1638,7 +1641,8 @@ def api_backtest(req: BacktestRequestSchema):
     # is the ML training label threshold (the return above which a trade is labelled "successful" for
     # supervised learning). They serve different purposes and intentionally do not share a default.
     settings = _get_settings()
-    profit_threshold = req.profit_threshold if req.profit_threshold is not None else 1.00
+    profit_threshold = req.profit_threshold if req.profit_threshold is not None else 0.08
+    calibration_target_pct = req.calibration_target_pct if req.calibration_target_pct is not None else 0.025
     horizon_days = int(settings.get("horizon_days", "10"))
 
     conn = sqlite3.connect(DB_PATH)
@@ -1667,7 +1671,7 @@ def api_backtest(req: BacktestRequestSchema):
 
         import joblib
         import os
-        cache_key = f"{LABELING_VERSION}_{train_window}_{increment}_{N}_{profit_threshold}_{req.data_start_idx}_{req.data_end_idx}"
+        cache_key = f"{LABELING_VERSION}_{train_window}_{increment}_{N}_{profit_threshold}_{calibration_target_pct}_{req.data_start_idx}_{req.data_end_idx}"
         cache_file = os.path.join(CACHE_DIR, f"cache_predictions_walkforward_{cache_key}.pkl")
         legacy_cache_file = os.path.join(CACHE_DIR, "cache_predictions_walkforward.pkl")
         
@@ -1705,7 +1709,7 @@ def api_backtest(req: BacktestRequestSchema):
                 print(f"Parallelizing {len(tasks)} walkforward steps across CPU cores...")
                 num_workers = min(16, os.cpu_count() or 4)
                 results = joblib.Parallel(n_jobs=num_workers, prefer="threads")(
-                    joblib.delayed(_process_walkforward_step)(T_start, T_end, df_real, profit_threshold)
+                    joblib.delayed(_process_walkforward_step)(T_start, T_end, df_real, profit_threshold, calibration_target_pct)
                     for T_start, T_end in tasks
                 )
 
@@ -1760,7 +1764,7 @@ def api_backtest(req: BacktestRequestSchema):
             }
             q_preds = enforce_monotonic_quantiles(q_preds)
             p_success = compute_calibrated_p_success(
-                profit_threshold,
+                calibration_target_pct,
                 q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
             )
             predictions.append({
@@ -1775,24 +1779,24 @@ def api_backtest(req: BacktestRequestSchema):
         raise HTTPException(status_code=400, detail=f"Unsupported mode: {req.mode}")
 
     # Sizing and exit params
-    prob_threshold = req.prob_threshold or 0.65
-    kelly_multiplier = req.kelly_multiplier or 0.5
-    kelly_cap = req.kelly_cap or 0.25
-    stop_lambda = req.stop_lambda or 1.2
-    max_risk_pct_per_trade = req.max_risk_pct_per_trade or 0.02
-    strategy_type = req.strategy_type or "standard"
-    max_concurrent_trades = req.max_concurrent_trades if req.max_concurrent_trades is not None else 1
-    scan_time = req.scan_time or "10:00:00"
-    min_kelly_fraction = req.min_kelly_fraction or 0.0
-    # hard_stop_loss: schema default is 2.0 (i.e. 2%), but sweep scripts pass fractional values like 0.30 (=30%).
-    # Convention: if value <= 1.0 treat as fraction directly; if > 1.0 treat as percentage and divide by 100.
-    _raw_hsl = req.hard_stop_loss if req.hard_stop_loss is not None else 0.0
+    # Defaults mirror BacktestRequestSchema — single source of truth.
+    # Convention: if hard_stop_loss <= 1.0 treat as fraction directly; if > 1.0 treat as percentage and divide by 100.
+    prob_threshold = req.prob_threshold
+    kelly_multiplier = req.kelly_multiplier
+    kelly_cap = req.kelly_cap
+    stop_lambda = req.stop_lambda
+    max_risk_pct_per_trade = req.max_risk_pct_per_trade
+    strategy_type = req.strategy_type
+    max_concurrent_trades = req.max_concurrent_trades
+    scan_time = req.scan_time
+    min_kelly_fraction = req.min_kelly_fraction
+    _raw_hsl = req.hard_stop_loss
     hard_stop_loss = _raw_hsl if _raw_hsl <= 1.0 else _raw_hsl / 100.0
-    max_quantile_spread = req.max_quantile_spread or 0.40
-    min_median_return = req.min_median_return or 0.03
-    slippage_pct = req.slippage_pct if req.slippage_pct is not None else 0.01
+    max_quantile_spread = req.max_quantile_spread
+    min_median_return = req.min_median_return
+    slippage_pct = req.slippage_pct
     max_iv = req.max_iv
-    min_open_interest = req.min_open_interest if req.min_open_interest is not None else 0
+    min_open_interest = req.min_open_interest
 
     # Apply lookback_days filter on pre-computed predictions
     if req.lookback_days is not None and req.lookback_days > 0 and predictions:
@@ -1868,6 +1872,7 @@ def api_backtest(req: BacktestRequestSchema):
             is_eligible = False
             cur_kelly_cap = kelly_cap
             cur_prob_threshold = prob_threshold
+            eff_hard_stop = hard_stop_loss  # default; vol_regime widens this in high-IV
 
             if strategy_type == "quantile_spread":
                 iqr = q_preds["p90"] - q_preds["p10"]
@@ -1881,13 +1886,18 @@ def api_backtest(req: BacktestRequestSchema):
                 if p_success >= cur_prob_threshold and q_preds["p50"] >= min_median_return and (is_bull or is_bear):
                     is_eligible = True
             elif strategy_type == "volatility_regime_adaptive":
+                # High-IV regime: modestly raise the bar, shrink size, WIDEN the stop (give trades room).
+                # Leap from 0.70 -> modest +0.05 raise (capped at 0.60) keeps trade count alive.
                 iv = float(row.get("implied_vol", 30))
                 if iv > 35.0:
-                    cur_prob_threshold = max(prob_threshold, 0.70)
+                    cur_prob_threshold = min(cur_prob_threshold + 0.05, 0.60)
                     cur_kelly_cap = min(kelly_cap, 0.15)
+                    eff_hard_stop = hard_stop_loss * 1.2
                 if p_success >= cur_prob_threshold:
                     is_eligible = True
             elif strategy_type == "confluence_sniper":
+                # LOOSENED AGGRESSIVELY: regime-aware but permissive — adds contrarian/hedged paths
+                # and drops the min_median_return gate so viable trades aren't choked out.
                 trend = str(row.get("trend_alignment", ""))
                 opt_t = str(row.get("option_type", ""))
                 side = str(row.get("side", ""))
@@ -1895,12 +1905,13 @@ def api_backtest(req: BacktestRequestSchema):
                 iqr = q_preds["p90"] - q_preds["p10"]
                 is_put_sell_bull_neutral = (opt_t == "Put" and side == "SELL" and trend in ("BULL_ALIGNED", "NEUTRAL"))
                 is_call_buy_bear_neutral = (opt_t == "Call" and side == "BUY" and trend in ("BEAR_ALIGNED", "NEUTRAL"))
-                regime_ok = is_put_sell_bull_neutral or is_call_buy_bear_neutral
-                iv_ok = (max_iv is None or iv <= max_iv)
+                is_put_buy_bull = (opt_t == "Put" and side == "BUY" and trend == "BULL_ALIGNED")
+                is_call_sell_bear = (opt_t == "Call" and side == "SELL" and trend == "BEAR_ALIGNED")
+                regime_ok = is_put_sell_bull_neutral or is_call_buy_bear_neutral or is_put_buy_bull or is_call_sell_bear
+                iv_ok = (max_iv is None or max_iv <= 0 or iv <= max_iv)
                 iqr_ok = (iqr <= max_quantile_spread)
-                median_ok = (q_preds["p50"] >= min_median_return)
                 prob_ok = (p_success >= cur_prob_threshold)
-                if regime_ok and iv_ok and iqr_ok and median_ok and prob_ok:
+                if regime_ok and iv_ok and iqr_ok and prob_ok:
                     is_eligible = True
             else:
                 # Default / Standard / Conservative / Aggressive strategies
@@ -1917,9 +1928,10 @@ def api_backtest(req: BacktestRequestSchema):
                 p50_pred = q_preds["p50"]
                 p90_pred = q_preds["p90"]
 
-                # Determine realized payoff structure (cap / stop) for this trade
-                if hard_stop_loss > 0.0:
-                    option_risk = hard_stop_loss
+                # Determine realized payoff structure (cap / stop) for this trade.
+                # Kelly is sized on GROSS cap/stop; one-leg exit slippage is applied at realization.
+                if eff_hard_stop > 0.0:
+                    option_risk = eff_hard_stop
                 else:
                     option_risk = abs(p10_pred * stop_lambda)
                     if option_risk > 1.0:
@@ -2160,19 +2172,23 @@ def api_get_default_backtest_cache():
         except Exception as ex:
             logger.warning(f"Failed to load BOOT_CACHE_PATH: {ex}")
 
-    # Determine top strategy and params from sweep_optimal.json if available
+    # Determine top strategy and params from sweep_optimal.json if available.
+    # # defaults mirror BacktestRequestSchema — single source of truth.
     strat_type = "quantile_spread"
     opt_params = {
-        "prob_threshold": 0.55,
-        "kelly_multiplier": 0.60,
-        "kelly_cap": 0.15,
-        "stop_lambda": 2.0,
-        "hard_stop_loss": 0.07,
-        "profit_threshold": 1.00,
-        "max_quantile_spread": 5.5,
-        "min_median_return": 0.05,
+        "prob_threshold": 0.35,
+        "kelly_multiplier": 0.80,
+        "kelly_cap": 0.30,
+        "stop_lambda": 1.5,
+        "hard_stop_loss": 0.06,
+        "profit_threshold": 0.08,
+        "calibration_target_pct": 0.025,
+        "max_quantile_spread": 0.35,
+        "min_median_return": 0.015,
         "max_concurrent_trades": 10,
-        "max_iv": 0.0
+        "max_iv": 120.0,
+        "slippage_pct": 0.01,
+        "min_kelly_fraction": 0.005
     }
     eval_type = "in-sample"
 
@@ -2192,16 +2208,19 @@ def api_get_default_backtest_cache():
             p = st_info.get("params", {})
             eval_type = st_info.get("evaluation", "unknown")
             opt_params = {
-                "prob_threshold": p.get("prob_threshold", 0.55),
-                "kelly_multiplier": p.get("kelly_multiplier", 0.50),
-                "kelly_cap": p.get("kelly_cap", 0.20),
+                "prob_threshold": p.get("prob_threshold", 0.35),
+                "kelly_multiplier": p.get("kelly_multiplier", 0.80),
+                "kelly_cap": p.get("kelly_cap", 0.30),
                 "stop_lambda": p.get("stop_lambda", 1.5),
-                "hard_stop_loss": p.get("hard_stop_loss", 0.07),
-                "profit_threshold": p.get("profit_threshold", 1.00),
-                "max_quantile_spread": p.get("max_quantile_spread", 5.0),
-                "min_median_return": p.get("min_median_return", 0.03),
+                "hard_stop_loss": p.get("hard_stop_loss", 0.06),
+                "profit_threshold": p.get("profit_threshold", 0.08),
+                "calibration_target_pct": p.get("calibration_target_pct", 0.025),
+                "max_quantile_spread": p.get("max_quantile_spread", 0.35),
+                "min_median_return": p.get("min_median_return", 0.015),
                 "max_concurrent_trades": int(p.get("max_concurrent_trades", 10)),
-                "max_iv": p.get("max_iv", 0.0)
+                "max_iv": p.get("max_iv", 120.0),
+                "slippage_pct": p.get("slippage_pct", 0.01),
+                "min_kelly_fraction": p.get("min_kelly_fraction", 0.005)
             }
 
     default_req = BacktestRequestSchema(
@@ -2213,12 +2232,14 @@ def api_get_default_backtest_cache():
         stop_lambda=opt_params.get("stop_lambda", 1.5),
         hard_stop_loss=opt_params["hard_stop_loss"],
         profit_threshold=opt_params["profit_threshold"],
+        calibration_target_pct=opt_params["calibration_target_pct"],
         max_quantile_spread=opt_params["max_quantile_spread"],
         min_median_return=opt_params["min_median_return"],
         max_concurrent_trades=opt_params["max_concurrent_trades"],
         walkforward_train_window=500,
         walkforward_test_increment=100,
-        slippage_pct=0.02,
+        slippage_pct=opt_params["slippage_pct"],
+        min_kelly_fraction=opt_params["min_kelly_fraction"],
         initial_capital=100000.0,
         max_iv=opt_params["max_iv"]
     )
