@@ -6,7 +6,7 @@
       "kelly_multiplier": 0.75,
       "kelly_cap": 0.12,
       "hard_stop_loss": 0.25,
-      "profit_threshold": 0.275,
+      "profit_threshold": 0.10,
       "strategy_type": "quantile_confidence"
     },
     "metrics": {
@@ -28,7 +28,7 @@
       "kelly_multiplier": 0.9,
       "kelly_cap": 0.12,
       "hard_stop_loss": 0.25,
-      "profit_threshold": 0.3,
+      "profit_threshold": 0.12,
       "strategy_type": "trend_breakout"
     },
     "metrics": {
@@ -49,7 +49,7 @@
       "kelly_multiplier": 0.75,
       "kelly_cap": 0.12,
       "hard_stop_loss": 0.25,
-      "profit_threshold": 0.3,
+      "profit_threshold": 0.11,
       "strategy_type": "iv_regime_adaptive"
     },
     "metrics": {

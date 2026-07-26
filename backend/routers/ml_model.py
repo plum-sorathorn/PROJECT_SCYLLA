@@ -504,7 +504,6 @@ def api_get_open_trades(
         from .unusual_options import scan_raw_options, SCAN_TICKERS
         raw_options = scan_raw_options(",".join(SCAN_TICKERS), min_vol_oi=0.1, limit=100)
         df = pd.DataFrame(raw_options)
-        models = get_global_model()
         
         if not df.empty:
             df = df.rename(columns={
@@ -1957,18 +1956,21 @@ def api_backtest(req: BacktestRequestSchema):
                 observed_return = float(row['observed_return']) if row['observed_return'] is not None else 0.0
                 max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
 
-                # Intraday stop-loss: use max_adverse_return (worst drawdown during trade life)
-                # to detect if the stop threshold was breached intra-trade, even if the trade
-                # recovered by settlement. max_adverse_return is negative (e.g. -0.30 = -30%).
                 if max_adverse_return <= -effective_stop:
                     exit_reason = "stop_hit"
                     trade_return = -effective_stop
                 elif observed_return >= profit_threshold:
                     exit_reason = "profit_hit"
                     trade_return = profit_threshold
+                elif observed_return <= -effective_stop:
+                    exit_reason = "stop_hit"
+                    trade_return = -effective_stop
                 else:
-                    exit_reason = "expired_profit" if observed_return > 0 else "expired_loss"
-                    trade_return = observed_return
+                    # Expired = total loss by design: option expired worthless,
+                    # so the simulated exit return is always -100% (-1.0).
+                    # The actual historical return is preserved separately in actual_return.
+                    exit_reason = "expired"
+                    trade_return = -1.0
 
                 trade_return -= slippage_pct
                 pnl_usd = position_size_usd * trade_return
@@ -2075,6 +2077,7 @@ def api_backtest(req: BacktestRequestSchema):
     if in_sample_warning:
         warnings.append("in-sample: indicative only, not valid for strategy validation")
     warnings.append("settlement-based: Sharpe/Sortino computed on settlement-day returns only — intra-trade mark-to-market risk is not captured")
+    warnings.append("expiration-model: expired trades treated as total premium loss (-100%); real options may retain residual intrinsic value")
     warnings.append("vix_hv_lookforward: VIX and HV features use current market values applied to all historical rows — mild look-ahead bias")
     warnings.append(f"slippage: flat {slippage_pct*100:.1f}% per-trade slippage applied; real bid-ask spread varies with IV/moneyness")
     if len(transactions) < 30:

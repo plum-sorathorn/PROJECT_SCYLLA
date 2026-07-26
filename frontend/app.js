@@ -44,6 +44,7 @@ const state = {
   backtestSweepResults: null,
   backtestSortKey: 'trade_date',
   backtestSortDir: -1,
+  backtestLoading: false,
   directDevConfirmed: false,
 
   // Optimal params loaded from /api/ml/optimal-params (scripts/sweep_optimal.json)
@@ -1276,9 +1277,9 @@ async function fetchOpenTrades() {
       topCard.style.display = 'block';
       $('top-trade-ticker').textContent = topTrade.ticker || '--';
       $('top-trade-prob').textContent = topTrade.p_success != null ? (topTrade.p_success * 100).toFixed(1) + '%' : '--';
-      const contract = `${topTrade.ticker} ${topTrade.expiration} ${(topTrade.option_type || '')[0]?.toUpperCase() || ''}${topTrade.strike}`;
+      const contract = `${topTrade.ticker} ${topTrade.expiration || '--'} ${(topTrade.option_type || '')[0]?.toUpperCase() || ''}${topTrade.strike}`;
       $('top-trade-contract').textContent = contract;
-      $('top-trade-kelly').textContent = topTrade.kelly_capped != null ? (topTrade.kelly_capped * 100).toFixed(1) + '%' : '--';
+      $('top-trade-kelly').textContent = topTrade.kelly_fraction != null ? (topTrade.kelly_fraction * 100).toFixed(1) + '%' : '--';
       $('top-trade-strategy').textContent = (topTrade.predicted_strategy || '--').replace(/_/g, ' ');
       $('top-trade-date').textContent = topTrade.timestamp ? topTrade.timestamp.split(' ')[0] : '--';
 
@@ -1430,9 +1431,9 @@ function renderOpenTradesTable() {
       topCard.style.display = 'block';
       if ($('top-trade-ticker')) $('top-trade-ticker').textContent = topTrade.ticker || '--';
       if ($('top-trade-prob')) $('top-trade-prob').textContent = topTrade.p_success != null ? (topTrade.p_success * 100).toFixed(1) + '%' : '--';
-      const contract = `${topTrade.ticker} ${topTrade.expiration} ${(topTrade.option_type || '')[0]?.toUpperCase() || ''}${topTrade.strike}`;
+      const contract = `${topTrade.ticker} ${topTrade.expiration || '--'} ${(topTrade.option_type || '')[0]?.toUpperCase() || ''}${topTrade.strike}`;
       if ($('top-trade-contract')) $('top-trade-contract').textContent = contract;
-      if ($('top-trade-kelly')) $('top-trade-kelly').textContent = topTrade.kelly_capped != null ? (topTrade.kelly_capped * 100).toFixed(1) + '%' : '--';
+      if ($('top-trade-kelly')) $('top-trade-kelly').textContent = topTrade.kelly_fraction != null ? (topTrade.kelly_fraction * 100).toFixed(1) + '%' : '--';
       if ($('top-trade-strategy')) $('top-trade-strategy').textContent = (topTrade.predicted_strategy || '--').replace(/_/g, ' ');
       if ($('top-trade-date')) $('top-trade-date').textContent = topTrade.timestamp ? topTrade.timestamp.split(' ')[0] : '--';
 
@@ -1473,7 +1474,7 @@ function renderOpenTradesTable() {
 
     const pSuccess = row.p_success != null ? (row.p_success * 100).toFixed(1) + '%' : '--';
     const pClass = row.p_success >= 0.70 ? 'accent-call' : (row.p_success <= 0.40 ? 'accent-coral' : '');
-    const kellyStr = row.kelly_capped != null ? (row.kelly_capped * 100).toFixed(1) + '%' : '--';
+    const kellyStr = row.kelly_fraction != null ? (row.kelly_fraction * 100).toFixed(1) + '%' : '--';
     const stratStr = (row.predicted_strategy || '--').replace(/_/g, ' ');
     let logDate = '--';
     if (row.timestamp) {
@@ -2045,6 +2046,8 @@ async function loadDefaultBacktestCache() {
       return;
     }
     console.warn('Default cache endpoint returned non-OK, running simulation...');
+    state.backtestLoading = false;
+    setLoading('backtest-loading', false);
     await runBacktestSimulation();
   } catch (err) {
     console.warn('Failed to fetch default backtest cache or run simulation:', err.message);
@@ -2055,10 +2058,16 @@ async function loadDefaultBacktestCache() {
 }
 
 async function runBacktestSimulation(e) {
+  console.log('[BACKTEST] Button clicked, event:', e?.type);
   if (e) e.preventDefault();
-  if (state.backtestLoading) return;
+  console.log('[BACKTEST] state.backtestLoading:', state.backtestLoading);
+  if (state.backtestLoading) {
+    console.warn('[BACKTEST] Already loading, ignoring click');
+    return;
+  }
   state.backtestLoading = true;
   setLoading('backtest-loading', true);
+  console.log('[BACKTEST] Starting simulation...');
   
   const modeEl = $('bt-mode');
   if (!modeEl) {
@@ -2130,6 +2139,7 @@ async function runBacktestSimulation(e) {
         } else {
           console.warn(`Boot backtest sweep combo count exceeds 20: ${totalCombos}`);
         }
+        state.backtestLoading = false;
         setLoading('backtest-loading', false);
         return;
       }
@@ -2235,6 +2245,7 @@ async function runBacktestSimulation(e) {
         } else {
           console.error(`Boot backtest failed: ${data.detail || 'Unknown error'}`);
         }
+        state.backtestLoading = false;
         setLoading('backtest-loading', false);
         return;
       }
@@ -2249,6 +2260,7 @@ async function runBacktestSimulation(e) {
     console.error('Backtest error:', err);
   } finally {
     setLoading('backtest-loading', false);
+    state.backtestLoading = false;
     state.directDevConfirmed = false;
   }
 }
@@ -2558,18 +2570,12 @@ function renderBacktestLedgerTable() {
   tbody.innerHTML = txs.map(t => {
     const isProfit = t.exit_reason === 'profit_hit';
     const isStop = t.exit_reason === 'stop_hit';
-    const isExpiredProfit = t.exit_reason === 'expired_profit';
-    const isExpiredLoss = t.exit_reason === 'expired_loss';
     
     let statusBadge;
     if (isProfit) {
       statusBadge = '<span class="badge-buy">PROFIT HIT</span>';
     } else if (isStop) {
       statusBadge = '<span class="badge-sell">STOP HIT</span>';
-    } else if (isExpiredProfit) {
-      statusBadge = '<span class="badge-buy">EXPIRED +</span>';
-    } else if (isExpiredLoss) {
-      statusBadge = '<span class="badge-sell">EXPIRED -</span>';
     } else {
       statusBadge = '<span class="badge-mid">EXPIRED</span>';
     }

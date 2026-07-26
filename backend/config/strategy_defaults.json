@@ -34,7 +34,7 @@
       "kelly_multiplier": 0.75,
       "kelly_cap": 0.12,
       "hard_stop_loss": 0.25,
-      "profit_threshold": 0.275,
+      "profit_threshold": 0.10,
       "max_quantile_spread": 0.20,
       "max_concurrent_trades": 8,
       "metrics": {
@@ -54,7 +54,7 @@
       "kelly_multiplier": 0.90,
       "kelly_cap": 0.12,
       "hard_stop_loss": 0.25,
-      "profit_threshold": 0.30,
+      "profit_threshold": 0.12,
       "min_median_return": 0.02,
       "max_concurrent_trades": 8,
       "metrics": {
@@ -74,7 +74,7 @@
       "kelly_multiplier": 0.75,
       "kelly_cap": 0.12,
       "hard_stop_loss": 0.25,
-      "profit_threshold": 0.30,
+      "profit_threshold": 0.11,
       "max_concurrent_trades": 8,
       "metrics": {
         "sharpe": 1.55,
