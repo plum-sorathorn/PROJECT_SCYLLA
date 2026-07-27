@@ -3,15 +3,39 @@ import datetime
 import random
 import os
 import math
+import sys
+import argparse
 import numpy as np
 import yfinance as yf
 import pandas as pd
 import joblib
 
+# Import the 50-ticker universe from the live scanner router so this dataset
+# stays in sync with production. Falls back to a hard-coded list if the
+# import fails (e.g. running outside the backend venv).
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from routers.unusual_options import SCAN_TICKERS
+    TICKERS = list(SCAN_TICKERS)
+except Exception:
+    TICKERS = [
+        "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AVGO", "TSLA", "WMT", "LLY",
+        "JPM", "UNH", "V", "XOM", "MA", "ORCL", "COST", "HD", "PG", "NFLX",
+        "BAC", "JNJ", "ABBV", "CRM", "CVX", "AMD", "KO", "PEP", "MRK", "TMO",
+        "PLTR", "DIS", "WFC", "ABT", "CSCO", "GE", "ACN", "IBM", "MCD", "NOW",
+        "INTU", "QCOM", "TXN", "GS", "AMAT", "CAT", "MS", "AMGN", "INTC", "UBER",
+    ]
+
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "scylla_ml.db"))
 CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "cache"))
 CACHE_FILE = os.path.join(CACHE_DIR, "cache_predictions_walkforward.pkl")
 MODEL_PATH = os.path.join(CACHE_DIR, "scylla_predictor.pkl")
+
+# Synthetic success threshold: an option return of >=5% over a ~10-day horizon is
+# a realistic bar for a long premium/short premium edge in equity options.
+# (Stock-only returns of 5% over 10 days are trivially easy; option P&L is
+#  convex in vol/gamma so 5% on the option premium is a meaningful cutoff.)
+SUCCESS_THRESHOLD = 0.05
 
 def norm_cdf(x):
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
@@ -45,17 +69,25 @@ def compute_garman_klass_vol(df, window=20):
     gk_vol = np.sqrt(np.maximum(gk_var.rolling(window=window, min_periods=5).mean(), 1e-6)) * math.sqrt(252)
     return gk_vol.fillna(0.25)
 
-def seed_grounded_options():
+def seed_grounded_options(wipe: bool = False):
     print(f"Seeding grounded options dataset into: {DB_PATH}")
+    print(f"Universe: {len(TICKERS)} tickers from SCAN_TICKERS.")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Clear existing options trades to replace with grounded dataset
-    cursor.execute("DELETE FROM options_trades")
-    conn.commit()
-    print("Cleared existing trades from options_trades table.")
+    # DESTRUCTIVE: only allowed with explicit --wipe flag. Default preserves
+    # the 44,320 real trades already in options_trades.
+    if wipe:
+        cursor.execute("DELETE FROM options_trades")
+        conn.commit()
+        print("[wipe] Cleared existing trades from options_trades table.")
+    else:
+        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE is_synthetic = 0")
+        real_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE is_synthetic = 1")
+        synth_count = cursor.fetchone()[0]
+        print(f"Preserving existing data: {real_count} real trades, {synth_count} existing synthetic trades.")
 
-    tickers = ["SPY", "QQQ", "IWM", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "AMD", "NFLX"]
     end_date = datetime.datetime.now()
     start_date = end_date - datetime.timedelta(days=3650) # ~10 years
 
@@ -73,7 +105,7 @@ def seed_grounded_options():
     total_inserted = 0
     rng = np.random.RandomState(42)
 
-    for ticker in tickers:
+    for ticker in TICKERS:
         print(f"Processing ticker {ticker}...")
         try:
             df = yf.download(ticker, start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"), progress=False)
@@ -226,7 +258,7 @@ def seed_grounded_options():
                     final_return = max(-1.0, min(3.0, final_return))
                     mae = max(-1.0, min(0.0, mae))
 
-                    success = 1 if final_return >= 0.05 else 0
+                    success = 1 if final_return >= SUCCESS_THRESHOLD else 0
 
                     # Volume & Open Interest correlated with stock volume
                     avg_vol = int(df_clean['Volume'].iloc[i]) if not math.isnan(df_clean['Volume'].iloc[i]) else 1000000
@@ -239,12 +271,20 @@ def seed_grounded_options():
                     eval_date_str = dates[i + eval_days].strftime("%Y-%m-%d")
                     expiration_str = (trade_date + datetime.timedelta(days=dte)).strftime("%Y-%m-%d")
 
+                    # Idempotency: skip if (timestamp, ticker, strike, option_type) already exists.
+                    cursor.execute(
+                        "SELECT 1 FROM options_trades WHERE timestamp = ? AND ticker = ? AND strike = ? AND option_type = ? LIMIT 1",
+                        (timestamp_str, ticker, round(strike, 2), opt_type),
+                    )
+                    if cursor.fetchone() is not None:
+                        continue
+
                     cursor.execute('''
                         INSERT INTO options_trades (
-                            timestamp, ticker, expiration, strike, option_type, volume, 
-                            open_interest, vol_oi_ratio, implied_vol, underlier_price, 
+                            timestamp, ticker, expiration, strike, option_type, volume,
+                            open_interest, vol_oi_ratio, implied_vol, underlier_price,
                             premium, side, dte, is_weekly, trend_alignment, labeled, label_success, observed_return, evaluation_date, max_adverse_return, is_synthetic
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?, 0)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?, 1)
                     ''', (
                         timestamp_str, ticker, expiration_str, round(strike, 2), opt_type, volume,
                         open_interest, vol_oi_ratio, iv_pct, round(S_t, 2), round(entry_price, 2), side, dte,
@@ -272,4 +312,7 @@ def seed_grounded_options():
     print(f"Finished seeding grounded options dataset! Total trades inserted: {total_inserted}")
 
 if __name__ == "__main__":
-    seed_grounded_options()
+    parser = argparse.ArgumentParser(description="Seed the SCYLLA synthetic options dataset grounded in real yfinance OHLCV.")
+    parser.add_argument("--wipe", action="store_true", help="DESTRUCTIVE: delete all existing options_trades before seeding.")
+    args = parser.parse_args()
+    seed_grounded_options(wipe=args.wipe)

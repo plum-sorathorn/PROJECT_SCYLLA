@@ -116,3 +116,4 @@ dist/
 *.tmp
 
 /.opencode
+/backend/cache

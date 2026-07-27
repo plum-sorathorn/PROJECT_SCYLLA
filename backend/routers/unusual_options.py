@@ -315,8 +315,8 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
         return []
 
     all_rows = []
-    # Fetch option chains in parallel across max 10 worker threads
-    workers = min(10, len(ticker_list))
+    # Fetch option chains in parallel across max 20 worker threads
+    workers = min(20, len(ticker_list))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_single_ticker, ticker, min_vol_oi): ticker for ticker in ticker_list}
         for future in as_completed(futures):

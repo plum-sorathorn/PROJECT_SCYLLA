@@ -10,6 +10,28 @@
 #include <cmath>
 #include <numeric>
 
+// ------------------------------------------------------------
+// SCYLLA PHASE B.1 — vendor link smoke test (LEAVE COMMENTED).
+// Uncomment the block below on a machine with MSVC to verify
+// that lib_lightgbm.dll and libcurl-x64.dll import correctly,
+// then re-comment (or delete) it before committing B.3 logic.
+// ------------------------------------------------------------
+#if 0
+#include <lightgbm/c_api.h>
+#include <curl/curl.h>
+
+[[maybe_unused]] static void scylla_phase_b1_smoke_test() {
+    // LightGBM C API link check (no real model yet — Phase B.3).
+    void* booster = nullptr;
+    LGBM_BoosterCreate(0, 0, reinterpret_cast<BoosterHandle*>(&booster));
+    LGBM_BoosterFree(static_cast<BoosterHandle>(booster));
+
+    // libcurl link check (no real request yet — Phase B.3).
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    curl_global_cleanup();
+}
+#endif
+
 namespace scylla {
 
 // Process a single row to produce enriched ProcessedOptionRow
