@@ -32,7 +32,8 @@ struct PredictRowInput {
     double open_interest = 0.0;
     double implied_vol = 0.0;
     double premium = 0.0;
-    std::string side = "CALL"; // "CALL" or "PUT"
+    std::string option_type = "Call"; // "Call" or "Put" — categorical feature
+    std::string side = "BUY";         // "BUY" or "SELL"
     double dte = 0.0;
     std::string is_weekly = "False"; // "True" or "False"
     std::string trend_alignment = "NEUTRAL"; // "BULL_ALIGNED", "BEAR_ALIGNED", "NEUTRAL"

@@ -136,7 +136,8 @@ std::vector<double> InferenceEngine::vectorize_features(
     // 2. Categorical features with One-Hot Encoding
     std::unordered_map<std::string, std::string> raw_cat;
     raw_cat["ticker"] = input.ticker;
-    raw_cat["side"] = input.side;
+    raw_cat["option_type"] = input.option_type;  // "Call" or "Put"
+    raw_cat["side"] = input.side;                 // "BUY" or "SELL"
     raw_cat["is_weekly"] = input.is_weekly;
     raw_cat["trend_alignment"] = input.trend_alignment;
 
@@ -274,8 +275,8 @@ StrategyOutput InferenceEngine::derive_strategy(
     if (valid_vol_oi && valid_iv && valid_dte && quality_signal) {
         out.strategy = "whale_quality";
     } else if (valid_vol_oi && valid_iv && valid_dte &&
-               ((input.trend_alignment == "BULL_ALIGNED" && input.side == "PUT") ||
-                (input.trend_alignment == "BEAR_ALIGNED" && input.side == "CALL")) &&
+               ((input.trend_alignment == "BULL_ALIGNED" && input.option_type == "Put") ||
+                (input.trend_alignment == "BEAR_ALIGNED" && input.option_type == "Call")) &&
                quality_signal) {
         out.strategy = "contrarian_trend";
     } else if (valid_vol_oi && valid_dte &&

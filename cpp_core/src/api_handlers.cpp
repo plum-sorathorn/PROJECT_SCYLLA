@@ -45,6 +45,9 @@ static PredictRowInput parsePredictRowInput(const json& j) {
     if (j.contains("implied_vol")) r.implied_vol = j["implied_vol"].get<double>();
     if (j.contains("premium")) r.premium = j["premium"].get<double>();
 
+    if (j.contains("option_type")) {
+        if (j["option_type"].is_string()) r.option_type = j["option_type"].get<std::string>();
+    }
     if (j.contains("side")) {
         if (j["side"].is_string()) r.side = j["side"].get<std::string>();
     }

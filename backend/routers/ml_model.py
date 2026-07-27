@@ -69,6 +69,41 @@ def get_global_model():
             pass
     return None
 
+
+def _fit_one_quantile_train(args):
+    """
+    Module-level helper for ProcessPoolExecutor (PARALLELIZATION_PLAN §4.1 / §4.2).
+    Must be at module scope so multiprocessing can pickle it by name on Windows.
+
+    args: (q, X_train, y_train, preprocessor, n_estimators, learning_rate,
+            num_leaves, min_child_samples, reg_lambda)
+    Returns: (q, fitted_Pipeline)
+    """
+    from sklearn.pipeline import Pipeline
+    import lightgbm as lgb
+
+    (q, X_train, y_train, preprocessor, n_estimators,
+     learning_rate, num_leaves, min_child_samples, reg_lambda) = args
+
+    pipe = Pipeline([
+        ("preprocess", preprocessor),
+        ("regressor", lgb.LGBMRegressor(
+            objective="quantile",
+            alpha=q,
+            n_estimators=n_estimators,
+            learning_rate=learning_rate,
+            num_leaves=num_leaves,
+            min_child_samples=min_child_samples,
+            reg_lambda=reg_lambda,
+            n_jobs=2,          # 2 cores per model × 5 workers = 10 cores
+            random_state=42,
+            verbose=-1,
+        ))
+    ])
+    pipe.fit(X_train, y_train)
+    return q, pipe
+
+
 class TradeSchema(BaseModel):
     ticker: str
     expiration: str
@@ -84,6 +119,59 @@ class TradeSchema(BaseModel):
     dte: int
     isWeekly: bool
     trendAlignment: str
+
+
+
+# C++ native inference engine URL (port 8080, hardcoded per AGENTS.md convention)
+_CPP_CORE_URL = "http://127.0.0.1:8080"
+
+
+def _cpp_batch_predict(rows: list[dict], timeout: float = 8.0) -> list[dict] | None:
+    """
+    PARALLELIZATION_PLAN §3.3 / Steps 15-16: delegate batch ML inference to the
+    C++ InferenceEngine via /api/v1/ml/predict-batch on port 8080.
+
+    Sends a list of row dicts (each with option fields) and returns a parallel
+    list of prediction dicts containing quantiles, p_success, strategy,
+    kelly_fraction.  Returns None if C++ is unreachable or returns an error,
+    so callers can fall back to the Python sklearn model path.
+
+    Args:
+        rows:    list of dicts with keys: ticker, underlier_price, strike,
+                 volume, open_interest, implied_vol, premium, option_type,
+                 side, dte, is_weekly, trend_alignment.
+        timeout: per-request timeout in seconds (default 8s).
+    Returns:
+        list of prediction dicts on success, or None on failure.
+    """
+    if not rows:
+        return []
+    try:
+        resp = requests.post(
+            f"{_CPP_CORE_URL}/api/v1/ml/predict-batch",
+            json={"rows": rows},
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                f"[cpp_batch] HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+            return None
+        data = resp.json()
+        predictions = data.get("predictions")
+        if not isinstance(predictions, list) or len(predictions) != len(rows):
+            logger.warning(
+                f"[cpp_batch] Unexpected response shape: {str(data)[:200]}"
+            )
+            return None
+        return predictions
+    except requests.exceptions.ConnectionError:
+        # scylla_core.exe not running — fall back to Python path silently
+        return None
+    except Exception as exc:
+        logger.warning(f"[cpp_batch] Error calling C++ predict-batch: {exc}")
+        return None
+
 
 class PredictRequestSchema(BaseModel):
     ticker: Optional[str] = "SPY"
@@ -675,6 +763,13 @@ def api_get_open_trades(
             })
             if 'timestamp' not in df.columns:
                 df['timestamp'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+            _MAX_IO_WORKERS = 20
+            unique_tickers = list(df['ticker'].unique())
+            if unique_tickers:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max(4, min(_MAX_IO_WORKERS, len(unique_tickers)))) as executor:
+                    futures = [executor.submit(_fetch_historical_volatility, t) for t in unique_tickers]
+                    concurrent.futures.wait(futures, timeout=None)
         
         highest_prob_trade = None
         max_p_success = -1.0
@@ -705,9 +800,9 @@ def api_get_open_trades(
                 _fetch_vix_level()
                 unique_tickers = list(df['ticker'].unique())
                 if unique_tickers:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(unique_tickers))) as executor:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(unique_tickers))) as executor:
                         futures = [executor.submit(_fetch_historical_volatility, t) for t in unique_tickers]
-                        concurrent.futures.wait(futures, timeout=5.0)
+                        concurrent.futures.wait(futures, timeout=None)
                         
                 feature_rows = []
                 for _, row in df.iterrows():
@@ -739,80 +834,114 @@ def api_get_open_trades(
                     feature_rows.append(row_data)
                 
                 if feature_rows:
-                    feat_df = pd.DataFrame(feature_rows)
-                    
-                    predicted_p10s = []
-                    predicted_p25s = []
-                    predicted_p50s = []
-                    predicted_p75s = []
-                    predicted_p90s = []
-                    predicted_strategies = []
-                    p_successes = []
-                    kellys = []
-                    
-                    if models is not None:
-                        p10_preds = models[0.1].predict(feat_df)
-                        p25_preds = models[0.25].predict(feat_df)
-                        p50_preds = models[0.5].predict(feat_df)
-                        p75_preds = models[0.75].predict(feat_df)
-                        p90_preds = models[0.9].predict(feat_df)
-                    
-                    for i in range(len(df)):
-                        row = df.iloc[i]
-                        tk = row['ticker'].upper()
-                        tk_hv = _hv_cache.get(tk, 0.0)
-                        hv_dec = tk_hv / 100.0
-                        ticker_hv_30d = hv_dec * np.sqrt(horizon_days / 252.0)
-                        if ticker_hv_30d <= 0.0:
-                            ticker_hv_30d = 0.04
-                            
-                        iqr_threshold = 1.5 * ticker_hv_30d
-                        direction_threshold = 0.25 * ticker_hv_30d
-                        
+                    # ── STEP 15: Try C++ InferenceEngine batch first ───────────────────
+                    # PARALLELIZATION_PLAN §3.3: forward entire batch to port 8080.
+                    # C++ runs LGBM_BoosterPredict natively (no GIL, no pickle load).
+                    # Falls back to Python sklearn path if scylla_core.exe is not up.
+                    cpp_rows = [
+                        {
+                            "ticker":          r["ticker"],
+                            "underlier_price": r["underlier_price"],
+                            "strike":          r["strike"],
+                            "volume":          r["volume"],
+                            "open_interest":   r["open_interest"],
+                            "implied_vol":     r["implied_vol"],
+                            "premium":         r["premium"],
+                            "option_type":     r["option_type"],
+                            "side":            r["side"],
+                            "dte":             r["dte"],
+                            "is_weekly":       str(r.get("is_weekly", "False")),
+                            "trend_alignment": r.get("trend_alignment", "NEUTRAL"),
+                        }
+                        for r in feature_rows
+                    ]
+
+                    cpp_preds = _cpp_batch_predict(cpp_rows)
+
+                    if cpp_preds is not None:
+                        # ── C++ path succeeded ───────────────────────────────
+                        logger.debug(f"[open_trades] C++ batch predict: {len(cpp_preds)} rows")
+                        predicted_p10s, predicted_p25s, predicted_p50s = [], [], []
+                        predicted_p75s, predicted_p90s = [], []
+                        predicted_strategies, p_successes, kellys = [], [], []
+
+                        for pred in cpp_preds:
+                            q = pred.get("quantiles", {})
+                            predicted_p10s.append(round(q.get("p10", 0.0), 4))
+                            predicted_p25s.append(round(q.get("p25", 0.0), 4))
+                            predicted_p50s.append(round(q.get("p50", 0.0), 4))
+                            predicted_p75s.append(round(q.get("p75", 0.0), 4))
+                            predicted_p90s.append(round(q.get("p90", 0.0), 4))
+                            predicted_strategies.append(pred.get("strategy", "NONE"))
+                            p_successes.append(round(float(pred.get("p_success", 0.0)), 4))
+                            kellys.append(round(float(pred.get("kelly_fraction", 0.0)), 4))
+
+                    else:
+                        # ── Python sklearn fallback path ──────────────────────
+                        feat_df = pd.DataFrame(feature_rows)
+                        predicted_p10s, predicted_p25s, predicted_p50s = [], [], []
+                        predicted_p75s, predicted_p90s = [], []
+                        predicted_strategies, p_successes, kellys = [], [], []
+
                         if models is not None:
-                            q_preds = {
-                                "p10": float(p10_preds[i]),
-                                "p25": float(p25_preds[i]),
-                                "p50": float(p50_preds[i]),
-                                "p75": float(p75_preds[i]),
-                                "p90": float(p90_preds[i])
-                            }
-                            q_preds = enforce_monotonic_quantiles(q_preds)
-                            p_succ = compute_calibrated_p_success(
-                                target_pct,
-                                q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
-                            )
-                            capped_kelly, _ = kelly_fraction(p_succ, q_preds["p50"], q_preds["p10"], q_preds["p90"])
-                            strat, _ = classify_strategy(q_preds["p50"], q_preds["p10"], q_preds["p90"], iqr_threshold, direction_threshold)
-                        else:
-                            # Heuristic fallback path
-                            score = 0.50
-                            if row['trend_alignment'] == 'BULL_ALIGNED':
-                                score += 0.15
-                            if row['side'] == 'BUY':
-                                score += 0.05
-                            p_succ = min(score, 0.95)
-                            
-                            median_val = 0.03
-                            q_preds = {
-                                "p10": median_val - 0.05,
-                                "p25": median_val - 0.025,
-                                "p50": median_val,
-                                "p75": median_val + 0.025,
-                                "p90": median_val + 0.05
-                            }
-                            capped_kelly, _ = kelly_fraction(p_succ, q_preds["p50"], q_preds["p10"], q_preds["p90"])
-                            strat, _ = classify_strategy(q_preds["p50"], q_preds["p10"], q_preds["p90"], iqr_threshold, direction_threshold)
-                            
-                        predicted_p10s.append(round(q_preds["p10"], 4))
-                        predicted_p25s.append(round(q_preds["p25"], 4))
-                        predicted_p50s.append(round(q_preds["p50"], 4))
-                        predicted_p75s.append(round(q_preds["p75"], 4))
-                        predicted_p90s.append(round(q_preds["p90"], 4))
-                        predicted_strategies.append(strat)
-                        p_successes.append(round(p_succ, 4))
-                        kellys.append(round(capped_kelly, 4))
-                        
+                            p10_preds = models[0.1].predict(feat_df)
+                            p25_preds = models[0.25].predict(feat_df)
+                            p50_preds = models[0.5].predict(feat_df)
+                            p75_preds = models[0.75].predict(feat_df)
+                            p90_preds = models[0.9].predict(feat_df)
+
+                        for i in range(len(df)):
+                            row = df.iloc[i]
+                            tk = row['ticker'].upper()
+                            tk_hv = _hv_cache.get(tk, 0.0)
+                            hv_dec = tk_hv / 100.0
+                            ticker_hv_30d = hv_dec * np.sqrt(horizon_days / 252.0)
+                            if ticker_hv_30d <= 0.0:
+                                ticker_hv_30d = 0.04
+
+                            iqr_threshold = 1.5 * ticker_hv_30d
+                            direction_threshold = 0.25 * ticker_hv_30d
+
+                            if models is not None:
+                                q_preds = {
+                                    "p10": float(p10_preds[i]),
+                                    "p25": float(p25_preds[i]),
+                                    "p50": float(p50_preds[i]),
+                                    "p75": float(p75_preds[i]),
+                                    "p90": float(p90_preds[i])
+                                }
+                                q_preds = enforce_monotonic_quantiles(q_preds)
+                                p_succ = compute_calibrated_p_success(
+                                    target_pct,
+                                    q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
+                                )
+                                capped_kelly, _ = kelly_fraction(p_succ, q_preds["p50"], q_preds["p10"], q_preds["p90"])
+                                strat, _ = classify_strategy(q_preds["p50"], q_preds["p10"], q_preds["p90"], iqr_threshold, direction_threshold)
+                            else:
+                                # Heuristic fallback path (no model at all)
+                                score = 0.50
+                                if row['trend_alignment'] == 'BULL_ALIGNED':
+                                    score += 0.15
+                                if row['side'] == 'BUY':
+                                    score += 0.05
+                                p_succ = min(score, 0.95)
+                                median_val = 0.03
+                                q_preds = {
+                                    "p10": median_val - 0.05, "p25": median_val - 0.025,
+                                    "p50": median_val, "p75": median_val + 0.025, "p90": median_val + 0.05
+                                }
+                                capped_kelly, _ = kelly_fraction(p_succ, q_preds["p50"], q_preds["p10"], q_preds["p90"])
+                                strat, _ = classify_strategy(q_preds["p50"], q_preds["p10"], q_preds["p90"], iqr_threshold, direction_threshold)
+
+                            predicted_p10s.append(round(q_preds["p10"], 4))
+                            predicted_p25s.append(round(q_preds["p25"], 4))
+                            predicted_p50s.append(round(q_preds["p50"], 4))
+                            predicted_p75s.append(round(q_preds["p75"], 4))
+                            predicted_p90s.append(round(q_preds["p90"], 4))
+                            predicted_strategies.append(strat)
+                            p_successes.append(round(p_succ, 4))
+                            kellys.append(round(capped_kelly, 4))
+
                     df['predicted_p10'] = predicted_p10s
                     df['predicted_p25'] = predicted_p25s
                     df['predicted_p50'] = predicted_p50s
@@ -821,6 +950,7 @@ def api_get_open_trades(
                     df['predicted_strategy'] = predicted_strategies
                     df['p_success'] = p_successes
                     df['kelly_fraction'] = kellys
+
                     
             except Exception as pred_ex:
                 logger.warning(f"Failed to compute dynamic predictions in api_get_open_trades: {pred_ex}")
@@ -930,40 +1060,73 @@ def api_get_trades(
                         feature_rows.append(row_data)
                     
                     if feature_rows:
-                        feat_df = pd.DataFrame(feature_rows)
-                        
-                        p10_preds = models[0.1].predict(feat_df)
-                        p50_preds = models[0.5].predict(feat_df)
-                        p90_preds = models[0.9].predict(feat_df)
-                        
-                        predicted_p50s = []
-                        predicted_strategies = []
-                        
-                        for i in range(len(df)):
-                            p10_val = float(p10_preds[i])
-                            p50_val = float(p50_preds[i])
-                            p90_val = float(p90_preds[i])
-                            
-                            tk_hv = _hv_cache.get(feature_rows[i]['ticker'], 0.0)
-                            hv_dec = tk_hv / 100.0
-                            ticker_hv_30d = hv_dec * np.sqrt(horizon_days / 252.0)
-                            if ticker_hv_30d <= 0.0:
-                                ticker_hv_30d = 0.04
-                                
-                            iqr_threshold = 1.5 * ticker_hv_30d
-                            direction_threshold = 0.25 * ticker_hv_30d
-                            
-                            p10_sorted, p50_sorted, p90_sorted = sorted([p10_val, p50_val, p90_val])
-                            
-                            strat, _ = classify_strategy(p50_sorted, p10_sorted, p90_sorted, iqr_threshold, direction_threshold)
-                            
-                            predicted_p50s.append(round(p50_sorted, 4))
-                            predicted_strategies.append(strat)
-                            
+                        # ── STEP 16: Try C++ InferenceEngine batch first ───────────
+                        # PARALLELIZATION_PLAN §3.3: forward to port 8080.
+                        # api_get_trades only needs p50 + strategy for the history table.
+                        cpp_rows = [
+                            {
+                                "ticker":          r["ticker"],
+                                "underlier_price": r["underlier_price"],
+                                "strike":          r["strike"],
+                                "volume":          r["volume"],
+                                "open_interest":   r["open_interest"],
+                                "implied_vol":     r["implied_vol"],
+                                "premium":         r["premium"],
+                                "option_type":     r["option_type"],
+                                "side":            r["side"],
+                                "dte":             r["dte"],
+                                "is_weekly":       str(r.get("is_weekly", "False")),
+                                "trend_alignment": r.get("trend_alignment", "NEUTRAL"),
+                            }
+                            for r in feature_rows
+                        ]
+
+                        cpp_preds = _cpp_batch_predict(cpp_rows)
+
+                        if cpp_preds is not None:
+                            logger.debug(f"[get_trades] C++ batch predict: {len(cpp_preds)} rows")
+                            predicted_p50s = [
+                                round(p.get("quantiles", {}).get("p50", 0.0), 4)
+                                for p in cpp_preds
+                            ]
+                            predicted_strategies = [
+                                p.get("strategy", "NONE") for p in cpp_preds
+                            ]
+                        else:
+                            # ── Python sklearn fallback ──────────────────────────
+                            feat_df = pd.DataFrame(feature_rows)
+                            p10_preds = models[0.1].predict(feat_df)
+                            p50_preds = models[0.5].predict(feat_df)
+                            p90_preds = models[0.9].predict(feat_df)
+
+                            predicted_p50s = []
+                            predicted_strategies = []
+
+                            for i in range(len(df)):
+                                p10_val = float(p10_preds[i])
+                                p50_val = float(p50_preds[i])
+                                p90_val = float(p90_preds[i])
+
+                                tk_hv = _hv_cache.get(feature_rows[i]['ticker'], 0.0)
+                                hv_dec = tk_hv / 100.0
+                                ticker_hv_30d = hv_dec * np.sqrt(horizon_days / 252.0)
+                                if ticker_hv_30d <= 0.0:
+                                    ticker_hv_30d = 0.04
+
+                                iqr_threshold = 1.5 * ticker_hv_30d
+                                direction_threshold = 0.25 * ticker_hv_30d
+
+                                p10_sorted, p50_sorted, p90_sorted = sorted([p10_val, p50_val, p90_val])
+                                strat, _ = classify_strategy(p50_sorted, p10_sorted, p90_sorted, iqr_threshold, direction_threshold)
+
+                                predicted_p50s.append(round(p50_sorted, 4))
+                                predicted_strategies.append(strat)
+
                         df['predicted_p50'] = predicted_p50s
                         df['predicted_strategy'] = predicted_strategies
                 except Exception as pred_ex:
                     logger.warning(f"Failed to compute dynamic predictions in api_get_trades: {pred_ex}")
+
             
         # Replace NaN/NaT with None for JSON compliance
         df = df.where(pd.notnull(df), None)
@@ -1022,70 +1185,87 @@ def api_label_trades(
             trades_by_ticker[ticker].append((trade_id, timestamp_str, option_type, start_price, side))
         
         labeled_count = 0
-        for ticker, ticker_trades in trades_by_ticker.items():
+        # PARALLELIZATION_PLAN §4.7: parallelize per-ticker yfinance fetch with ThreadPoolExecutor.
+        # SQLite writes must be serialized — use a lock around DB commits.
+        _label_lock = threading.Lock()
+        _label_db_rows = []  # accumulate (trade_id, success, ret, mar, eval_date)
+
+        def _label_one_ticker(ticker_and_trades):
+            ticker, ticker_trades = ticker_and_trades
+            rows = []
             try:
                 dates = [datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").date() for _, ts, _, _, _ in ticker_trades]
                 min_date = min(dates)
                 max_date = max(dates) + datetime.timedelta(days=effective_horizon + 2)
-                
+
                 tk = yf.Ticker(ticker)
-                hist = tk.history(start=min_date.strftime("%Y-%m-%d"), 
+                hist = tk.history(start=min_date.strftime("%Y-%m-%d"),
                                   end=max_date.strftime("%Y-%m-%d"))
-                
+
                 if hist.empty:
-                    continue
-                
+                    return rows
+
                 hist.index = hist.index.date
-                
+
                 for trade_id, timestamp_str, option_type, start_price, side in ticker_trades:
                     trade_date = datetime.datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").date()
                     end_date = trade_date + datetime.timedelta(days=effective_horizon)
-                    
+
                     trade_hist = hist.loc[trade_date:end_date]
                     if trade_hist.empty:
                         continue
-                    
+
                     prices = trade_hist['Close'].values
                     is_bullish = (option_type == "Call" and side == "BUY") or (option_type == "Put" and side == "SELL")
-                    
+
                     success = 0
                     continuous_favorable_return = 0.0
                     max_adverse_return = 0.0
-                    
+
                     if len(prices) > 0:
                         settlement_price = prices[-1]
                         min_price = np.min(prices)
                         max_price = np.max(prices)
-                        
+
                         if is_bullish:
                             continuous_favorable_return = (settlement_price - start_price) / start_price
                             max_adverse_return = (min_price - start_price) / start_price
                         else:
                             continuous_favorable_return = (start_price - settlement_price) / start_price
                             max_adverse_return = (start_price - max_price) / start_price
-                        
+
                         if continuous_favorable_return >= effective_threshold:
                             success = 1
-                    
-                    cursor.execute("""
-                        UPDATE options_trades
-                        SET labeled = 1,
-                            label_success = ?,
-                            observed_return = ?,
-                            max_adverse_return = ?,
-                            evaluation_date = ?
-                        WHERE id = ?
-                    """, (success, 
-                          round(float(continuous_favorable_return), 4), 
-                          round(float(max_adverse_return), 4), 
-                          end_date.strftime("%Y-%m-%d"), 
-                          trade_id))
-                    conn.commit()
-                    labeled_count += 1
-                    
+
+                    rows.append((
+                        trade_id, success,
+                        round(float(continuous_favorable_return), 4),
+                        round(float(max_adverse_return), 4),
+                        end_date.strftime("%Y-%m-%d"),
+                    ))
             except Exception as ex:
                 logger.warning(f"Error labeling trades for ticker {ticker}: {ex}")
-                continue
+            return rows
+
+        _MAX_LABEL_WORKERS = 20
+        ticker_items = list(trades_by_ticker.items())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(_MAX_LABEL_WORKERS, len(ticker_items))) as ex:
+            for rows in ex.map(_label_one_ticker, ticker_items):
+                if rows:
+                    # Serialize DB writes — SQLite is not safe for concurrent writes
+                    for (trade_id, success, ret, mar, eval_date) in rows:
+                        cursor.execute("""
+                            UPDATE options_trades
+                            SET labeled = 1,
+                                label_success = ?,
+                                observed_return = ?,
+                                max_adverse_return = ?,
+                                evaluation_date = ?
+                            WHERE id = ?
+                        """, (success, ret, mar, eval_date, trade_id))
+                        labeled_count += 1
+                    conn.commit()
+
                 
         conn.close()
         return {"labeled_count": labeled_count, "message": f"Successfully labeled {labeled_count} trades."}
@@ -1259,25 +1439,40 @@ def api_train_model():
         X_train, X_test, y_train_continuous, y_test_continuous = train_test_split(X, y, test_size=0.2, random_state=42)
 
         # 5 independent LightGBM regressors, one per quantile
+        # PARALLELIZATION_PLAN §4.1: fit all 5 quantile models in parallel via ProcessPoolExecutor.
+        # Each worker fits one model on 2 cores (n_jobs=2), for 5×2 = 10 cores total.
+        # ProcessPoolExecutor avoids GIL contention; sklearn Pipeline pickles cleanly.
         QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
         models = {}
-        for q in QUANTILES:
-            pipe = Pipeline([
-                ("preprocess", preprocessor),
-                ("regressor", lgb.LGBMRegressor(
-                    objective="quantile",
-                    alpha=q,
-                    n_estimators=150,
-                    learning_rate=0.03,
-                    num_leaves=15,
-                    min_child_samples=30,
-                    reg_lambda=1.0,
-                    random_state=42,
-                    verbose=-1
-                ))
-            ])
-            pipe.fit(X_train, y_train_continuous)
-            models[q] = pipe
+        fit_args = [
+            (q, X_train, y_train_continuous, preprocessor, 150, 0.03, 15, 30, 1.0)
+            for q in QUANTILES
+        ]
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=5) as ex:
+                for q, pipe in ex.map(_fit_one_quantile_train, fit_args):
+                    models[q] = pipe
+        except Exception as pool_ex:
+            # Fall back to sequential if ProcessPoolExecutor fails (e.g., pickling issue)
+            logger.warning(f"ProcessPoolExecutor training failed ({pool_ex}), falling back to sequential")
+            models = {}
+            for q in QUANTILES:
+                pipe = Pipeline([
+                    ("preprocess", preprocessor),
+                    ("regressor", lgb.LGBMRegressor(
+                        objective="quantile",
+                        alpha=q,
+                        n_estimators=150,
+                        learning_rate=0.03,
+                        num_leaves=15,
+                        min_child_samples=30,
+                        reg_lambda=1.0,
+                        random_state=42,
+                        verbose=-1
+                    ))
+                ])
+                pipe.fit(X_train, y_train_continuous)
+                models[q] = pipe
 
         # Enforce quantile monotonicity post-fit & compute pinball loss
         pinball_losses = {}
@@ -1755,15 +1950,14 @@ class BacktestRequestSchema(BaseModel):
     stop_lambda: Optional[float] = 1.5
     max_risk_pct_per_trade: Optional[float] = 0.02
     walkforward_train_window: Optional[int] = 500
-    walkforward_test_increment: Optional[int] = 100
+    walkforward_test_increment: Optional[int] = 250  # PHASE A: 250 = synthetic-tuned optimal (recycle bin cache v2_settlement_500_250_68802_0.5_0.025_0_None.pkl). 100 is too slow on 68k trades (~683 steps, 15-30 min).
     confirm_direct_dev: Optional[bool] = False
     strategy_type: Optional[str] = "whale_quality"  # PHASE A: default to new strategy
     max_concurrent_trades: Optional[int] = 12  # PHASE A: was 8 — allow more concurrent (with tighter Kelly)
     scan_time: Optional[str] = "10:00:00"
     min_kelly_fraction: Optional[float] = 0.01
-    hard_stop_loss: Optional[float] = 0.06   # PHASE A: was 0.25 — tight stop now that time-stop also exists. NOTE: pass-3 default (0.04) is set LOWER in the schema below; this 0.06 line is the historical value preserved for back-compat. The active default the backtest actually uses is the one defined later in this class.
     lookback_days: Optional[int] = None
-    profit_threshold: Optional[float] = 0.05  # PHASE A pass 3: was 0.08 — 5% matches the empirical win-rate curve better now that the realistic expiration is in place
+    profit_threshold: Optional[float] = 0.50  # PHASE A (synthetic-tuned): 50% captures the 28.77% of synth trades with observed_return >= 50% (mean winner return +0.99) — lottery-ticket payoff structure verified by scripts/verify_phase_a.py
     max_quantile_spread: Optional[float] = 0.35
     min_median_return: Optional[float] = 0.015
     slippage_pct: Optional[float] = 0.01
@@ -1771,8 +1965,8 @@ class BacktestRequestSchema(BaseModel):
     min_open_interest: Optional[int] = 100
     min_dte: Optional[int] = 7
     max_dte: Optional[int] = 60
-    data_start_idx: Optional[int] = None
-    data_end_idx: Optional[int] = None
+    data_start_idx: Optional[int] = 0  # PHASE A: default 0 (start of dataset) so default cache_key matches existing on-disk caches (e.g. ..._0_None.pkl). Legacy default of None produced a non-matching ..._None_None key.
+    data_end_idx: Optional[int] = None  # None = use all data through end of dataset.
     hard_stop_loss: Optional[float] = 0.04  # PHASE A pass 3: was 0.06 — tighter stop OK because hold_to_horizon is no longer catastrophic
     # PHASE A: when True, run backtest on the synthetic dataset (is_synthetic=1) instead
     # of real scanner output. Also bypasses the TIER_PROFITABLE_TICKERS gate in the new
@@ -1825,23 +2019,36 @@ def _process_walkforward_step(T_start, T_end, df_real, profit_threshold, calibra
 
     QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
     models = {}
-    for q in QUANTILES:
-        pipe = Pipeline([
-            ("preprocess", preprocessor),
-            ("regressor", lgb.LGBMRegressor(
-                objective="quantile",
-                alpha=q,
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                num_leaves=20,
-                min_child_samples=min_child_samples,
-                random_state=42,
-                verbose=-1,
-                n_jobs=4
-            ))
-        ])
-        pipe.fit(X_train, y_train)
-        models[q] = pipe
+    # PARALLELIZATION_PLAN §4.2: fit 5 quantile models in parallel per walkforward step.
+    # The outer joblib uses threads, so inner ProcessPoolExecutor is safe (no process fork clash).
+    wf_fit_args = [
+        (q, X_train, y_train, preprocessor, n_estimators, learning_rate, 20, min_child_samples, 1.0)
+        for q in QUANTILES
+    ]
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=5) as ex:
+            for q, pipe in ex.map(_fit_one_quantile_train, wf_fit_args):
+                models[q] = pipe
+    except Exception as pool_ex:
+        logger.warning(f"Walkforward ProcessPoolExecutor failed ({pool_ex}), falling back to sequential")
+        models = {}
+        for q in QUANTILES:
+            pipe = Pipeline([
+                ("preprocess", preprocessor),
+                ("regressor", lgb.LGBMRegressor(
+                    objective="quantile",
+                    alpha=q,
+                    n_estimators=n_estimators,
+                    learning_rate=learning_rate,
+                    num_leaves=20,
+                    min_child_samples=min_child_samples,
+                    random_state=42,
+                    verbose=-1,
+                    n_jobs=4
+                ))
+            ])
+            pipe.fit(X_train, y_train)
+            models[q] = pipe
 
     df_test_feat = compute_advanced_features(df_test)
     X_test = df_test_feat[['ticker'] + numeric_features + categorical_features]
@@ -1978,7 +2185,9 @@ def api_backtest(req: BacktestRequestSchema):
                     T += increment
 
                 print(f"Parallelizing {len(tasks)} walkforward steps across CPU cores...")
-                num_workers = min(16, os.cpu_count() or 4)
+                # PARALLELIZATION_PLAN §4.4: cap outer workers at 4 so 4 outer × 5 inner
+                # quantile workers = 20 cores total, matching the 10c/20t machine.
+                num_workers = min(4, os.cpu_count() or 4)
                 results = joblib.Parallel(n_jobs=num_workers, prefer="threads")(
                     joblib.delayed(_process_walkforward_step)(T_start, T_end, df_real, profit_threshold, calibration_target_pct)
                     for T_start, T_end in tasks
@@ -2643,14 +2852,16 @@ def api_get_strategy_defaults():
 
 
 @router.get("/ml/backtest/default_cache")
-def api_get_default_backtest_cache():
+def api_get_default_backtest_cache(use_synthetic: bool = True):
     """Returns cached backtest results for the top-ranked strategy
     with its optimal validated parameters from sweep_optimal.json for instant app boot rendering. Loads from disk in < 50ms.
     """
     model_mtime = str(os.path.getmtime(MODEL_PATH)) if os.path.exists(MODEL_PATH) else "no_model"
     sweep_data, sweep_path = _read_sweep_optimal()
     sweep_mtime = str(os.path.getmtime(sweep_path)) if (sweep_path and os.path.exists(sweep_path)) else "no_sweep"
-    cache_version = f"{model_mtime}_{sweep_mtime}"
+    # Include use_synthetic in cache key so a synthetic-tuned boot cache is
+    # not served to a real-data request (or vice versa).
+    cache_version = f"{model_mtime}_{sweep_mtime}_{use_synthetic}"
 
     if os.path.exists(BOOT_CACHE_PATH):
         try:
@@ -2666,20 +2877,23 @@ def api_get_default_backtest_cache():
     # was not a valid strategy name and would fall through to no-match,
     # making the boot cache render an empty backtest result.
     strat_type = "whale_quality"
+    # Read defaults from BacktestRequestSchema — single source of truth.
+    # (Construct a default instance and dump its fields.)
+    _default_req = BacktestRequestSchema()
     opt_params = {
-        "prob_threshold": 0.35,
-        "kelly_multiplier": 0.80,
-        "kelly_cap": 0.30,
-        "stop_lambda": 1.5,
-        "hard_stop_loss": 0.06,
-        "profit_threshold": 0.08,
-        "calibration_target_pct": 0.025,
-        "max_quantile_spread": 0.35,
-        "min_median_return": 0.015,
-        "max_concurrent_trades": 10,
-        "max_iv": 120.0,
-        "slippage_pct": 0.01,
-        "min_kelly_fraction": 0.005
+        "prob_threshold": _default_req.prob_threshold,
+        "kelly_multiplier": _default_req.kelly_multiplier,
+        "kelly_cap": _default_req.kelly_cap,
+        "stop_lambda": _default_req.stop_lambda,
+        "hard_stop_loss": _default_req.hard_stop_loss,
+        "profit_threshold": _default_req.profit_threshold,
+        "calibration_target_pct": _default_req.calibration_target_pct,
+        "max_quantile_spread": _default_req.max_quantile_spread,
+        "min_median_return": _default_req.min_median_return,
+        "max_concurrent_trades": _default_req.max_concurrent_trades,
+        "max_iv": _default_req.max_iv,
+        "slippage_pct": _default_req.slippage_pct,
+        "min_kelly_fraction": _default_req.min_kelly_fraction,
     }
     eval_type = "in-sample"
 
@@ -2728,11 +2942,13 @@ def api_get_default_backtest_cache():
         min_median_return=opt_params["min_median_return"],
         max_concurrent_trades=opt_params["max_concurrent_trades"],
         walkforward_train_window=500,
-        walkforward_test_increment=100,
+        walkforward_test_increment=250,  # PHASE A: matches schema default
         slippage_pct=opt_params["slippage_pct"],
         min_kelly_fraction=opt_params["min_kelly_fraction"],
         initial_capital=100000.0,
-        max_iv=opt_params["max_iv"]
+        max_iv=opt_params["max_iv"],
+        data_start_idx=0,  # PHASE A: matches schema default (0 = start)
+        use_synthetic=use_synthetic,  # PHASE A: bug fix — was always False, ignoring the function arg.
     )
     try:
         res = api_backtest(default_req)

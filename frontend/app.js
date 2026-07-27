@@ -1308,9 +1308,9 @@ async function fetchOpenTrades() {
 }
 
 const STRATEGY_DEFAULT_PARAMS = {
-  quantile_confidence: { prob: 40, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, max_spread: 0.20, median_ret: 0, max_iv: 0, profit: 27.5 },
-  trend_breakout: { prob: 38, kelly: 0.90, kelly_cap: 12, stop: 1.5, hard_stop: 25, max_spread: 0, median_ret: 2, max_iv: 0, profit: 30 },
-  iv_regime_adaptive: { prob: 38, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, max_spread: 0, median_ret: 0, max_iv: 0, profit: 30 },
+  whale_quality:     { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0.25, median_ret: 0, max_iv: 150, profit: 5 },
+  contrarian_trend:  { prob: 35, kelly: 0.90, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 5 },
+  vol_regime:        { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 5 },
 };
 
 function getStrategyParams(strategyType) {
@@ -1331,30 +1331,32 @@ function isEligibleForStrategy(trade, strategyType) {
 
   const pSuccess = Number(trade.p_success) || 0;
   const p10 = Number(trade.predicted_p10) || 0;
-  const p50 = Number(trade.predicted_p50) || 0;
   const p90 = Number(trade.predicted_p90) || 0;
+  const p50 = Number(trade.predicted_p50) || 0;
   const iqr = p90 - p10;
   const iv = Number(trade.implied_vol) || 0;
   const optType = trade.option_type || '';
-  const side = trade.side || '';
   const trend = trade.trend_alignment || '';
 
-  const probThreshold = (p.prob != null ? p.prob : 40) / 100.0;
-  const minMedianReturn = (p.median_ret != null ? p.median_ret : 3) / 100.0;
+  const probThreshold = (p.prob != null ? p.prob : 35) / 100.0;
+  const minMedianReturn = (p.median_ret != null ? p.median_ret : 0) / 100.0;
   const maxQuantileSpread = p.max_spread || 5.0;
-  const maxIv = p.max_iv || 0;
 
-  if (strategyType === 'quantile_confidence') {
-    return pSuccess >= probThreshold && iqr <= maxQuantileSpread;
+  if (strategyType === 'whale_quality') {
+    // Fades high-confidence, tight-IQR, mid-IV setups on TIER_A tickers
+    return pSuccess >= probThreshold && (maxQuantileSpread <= 0 || iqr <= maxQuantileSpread);
   }
-  if (strategyType === 'trend_breakout') {
-    const isBull = (optType === 'Call' && trend === 'BULL_ALIGNED');
-    const isBear = (optType === 'Put' && trend === 'BEAR_ALIGNED');
-    return pSuccess >= probThreshold && p50 >= minMedianReturn && (isBull || isBear);
+  if (strategyType === 'contrarian_trend') {
+    // Fades trend: BULL_ALIGNED+Put or BEAR_ALIGNED+Call
+    const isContrarian = (optType === 'Put' && trend === 'BULL_ALIGNED') ||
+                         (optType === 'Call' && trend === 'BEAR_ALIGNED');
+    return pSuccess >= probThreshold && isContrarian;
   }
-  if (strategyType === 'iv_regime_adaptive') {
-    const curProb = iv >= 30.0 ? Math.max(probThreshold, 0.50) : probThreshold;
-    return pSuccess >= curProb;
+  if (strategyType === 'vol_regime') {
+    // Low-IV: tighter threshold; High-IV: looser IQR allowed
+    const curProb = iv < 30.0 ? Math.max(probThreshold, 0.40) : probThreshold;
+    const iqrOk = iv >= 30.0 ? (iqr <= 0.35) : true;
+    return pSuccess >= curProb && iqrOk;
   }
   return pSuccess >= probThreshold;
 }
@@ -1620,9 +1622,9 @@ function setupEventListeners() {
 // expect prob/kelly_cap/hard_stop/median_ret in percent (×100), kelly/stop_lambda
 // as fractions, max_spread/max_iv as absolute, profit_threshold in percent.
 const FALLBACK_OPT_PARAMS = {
-  'quantile_confidence': { prob: 40, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, concurrent: 8, profit: 27.5, median_ret: 0,  max_spread: 0.20, max_iv: 0 },
-  'trend_breakout':      { prob: 38, kelly: 0.90, kelly_cap: 12, stop: 1.5, hard_stop: 25, concurrent: 8, profit: 30, median_ret: 2,  max_spread: 0, max_iv: 0 },
-  'iv_regime_adaptive':  { prob: 38, kelly: 0.75, kelly_cap: 12, stop: 1.5, hard_stop: 25, concurrent: 8, profit: 30, median_ret: 0,  max_spread: 0, max_iv: 0 },
+  'whale_quality':    { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, concurrent: 12, profit: 5,  median_ret: 0, max_spread: 0.25, max_iv: 150 },
+  'contrarian_trend': { prob: 35, kelly: 0.90, kelly_cap: 5,  stop: 1.5, hard_stop: 4, concurrent: 12, profit: 5,  median_ret: 0, max_spread: 0,    max_iv: 150 },
+  'vol_regime':       { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, concurrent: 12, profit: 5,  median_ret: 0, max_spread: 0,    max_iv: 150 },
 };
 
 function mapApiOptimalToFormInputs(params) {
@@ -2039,7 +2041,8 @@ async function loadDefaultBacktestCache() {
   state.booting = true;
   setLoading('backtest-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/ml/backtest/default_cache`);
+    const useSyntheticFlag = $('bt-use-synthetic')?.checked ?? true;
+    const r = await fetch(`${API_BASE}/api/ml/backtest/default_cache?use_synthetic=${useSyntheticFlag}`);
     if (r.ok) {
       const data = await r.json();
       loadBacktestData(data);
@@ -2169,9 +2172,10 @@ async function runBacktestSimulation(e) {
             profit_threshold: profitThreshold,
             max_quantile_spread: maxQuantileSpread,
             min_median_return: minMedianReturn,
-            slippage_pct: slippagePct
+            slippage_pct: slippagePct,
+            use_synthetic: $('bt-use-synthetic')?.checked ?? true
           };
-          
+
           promises.push(
             fetch(`${API_BASE}/api/ml/backtest`, {
               method: 'POST',
@@ -2230,7 +2234,8 @@ async function runBacktestSimulation(e) {
         profit_threshold: profitThreshold,
         max_quantile_spread: maxQuantileSpread,
         min_median_return: minMedianReturn,
-        slippage_pct: slippagePct
+        slippage_pct: slippagePct,
+        use_synthetic: $('bt-use-synthetic')?.checked ?? true
       };
 
       const r = await fetch(`${API_BASE}/api/ml/backtest`, {

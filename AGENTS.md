@@ -1,4 +1,4 @@
-﻿# AGENTS.md — PROJECT: SCYLLA // TERMINAL
+# AGENTS.md — PROJECT: SCYLLA // TERMINAL
 
 High-performance options whale scanner. Hybrid 3-tier: cyberpunk HTML/JS frontend → C++ Crow (`scylla_core.exe`, :8080) → Python FastAPI/OpenBB ODP (uvicorn, :6900) → yfinance + CBOE. Windows-only. No paid API keys.
 
@@ -9,7 +9,7 @@ High-performance options whale scanner. Hybrid 3-tier: cyberpunk HTML/JS fronten
 | One-click launch (user) | `.\LAUNCH_SCYLLA.ps1` (or `.bat`) |
 | Dev mode (Python only, no C++ build) | `.\scripts\start_dev.ps1` |
 | Full production build + launch | `.\scripts\deploy.ps1` |
-| C++ build only | `cd cpp_core\build && cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release && cmake --build . --config Release --parallel` |
+| C++ build only | `cd cpp_core\build && cmake .. -G "Visual Studio 18 2026" -A x64 -DCMAKE_BUILD_TYPE=Release && cmake --build . --config Release --parallel` |
 | Python venv activate | `backend\.venv\Scripts\Activate.ps1` |
 | Run Python backend | `uvicorn main:app --host 127.0.0.1 --port 6900 --reload` (from `backend\`) |
 | Health check | `curl http://127.0.0.1:8080/health` and `:6900/health` |
@@ -40,7 +40,7 @@ The C++ ↔ Python bridge is `cpp_core\src\data_fetcher.cpp`. It uses **WinHTTP*
 
 ## C++ build (Windows, MSVC required)
 
-- Generator: **Visual Studio 17 2022**, x64, C++17.
+- Generator: **Visual Studio 18 2026**, x64, C++17.
 - Vendored headers (Crow, Asio standalone, nlohmann/json) in `cpp_core\third_party\`. Populated by `scripts\fetch_vendors.ps1` — do not hand-edit.
 - Output: `cpp_core\build\Release\scylla_core.exe`.
 - Links `ws2_32` + `wsock32` (Windows sockets).
@@ -52,7 +52,8 @@ The C++ ↔ Python bridge is `cpp_core\src\data_fetcher.cpp`. It uses **WinHTTP*
 - SQLite DB: `backend\scylla_ml.db` (gitignored). Has a `.bak` next to it.
 - Model pickle: `backend\cache\scylla_predictor.pkl` (gitignored).
 - LightGBM quantile regression, `LABELING_VERSION = "v2_settlement"`, default `horizon_days=10`, `profit_threshold=0.03`, `prob_threshold=0.55`, `_execute_with_retry` = 5 retries + exp backoff, DB in WAL mode.
-- `backend\routers\ml_derivations.py` is pure functions (P(success), strategy, Kelly). Clip bounds `0.02`/`0.98`, `kelly_cap=0.25`.
+- **Parallelization architecture**: Live inference delegates to the C++ engine (port 8080) via a batch proxy, bypassing the Python GIL. Model training is heavily parallelized natively in Python using `ProcessPoolExecutor(5)`. Walk-forward backtesting is capped to `min(4, os.cpu_count())` outer workers to avoid core oversubscription. Historical labeling uses `ThreadPoolExecutor(20)` for concurrent network I/O.
+- `backend\routers\ml_derivations.py` is pure functions (P(success), strategy, Kelly). Clip bounds `0.02`/`0.98`, `kelly_cap=0.25`. Strategies are classified as `whale_quality`, `contrarian_trend`, and `vol_regime`.
 
 ## No-go / fragile files (do not edit casually)
 
