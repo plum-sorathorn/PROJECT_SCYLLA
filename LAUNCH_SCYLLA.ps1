@@ -131,7 +131,7 @@ if (Test-Path $CPP_EXE) {
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "   SCYLLA HYBRID 3-TIER ENGINE IS ONLINE" -ForegroundColor Green
-Write-Host "   (No NPM/Node build required — Native HTML/JS + C++ Crow)" -ForegroundColor DarkGray
+Write-Host "   (No NPM/Node build required - Native HTML/JS + C++ Crow)" -ForegroundColor DarkGray
 Write-Host ""
 if (Test-Path $CPP_EXE) {
     Write-Host "   Python ODP Gateway : http://127.0.0.1:6900"
