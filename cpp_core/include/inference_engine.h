@@ -104,6 +104,9 @@ private:
     std::vector<std::vector<std::string>> ohe_categories_;
     int total_feature_dim_ = 0;
 
+    std::unordered_map<std::string, size_t> numeric_feature_idx_;
+    std::unordered_map<std::string, size_t> cat_feature_idx_;
+
     // Caching
     mutable std::mutex hv_cache_mutex_;
     mutable std::unordered_map<std::string, double> hv_cache_;

@@ -36,6 +36,10 @@
       "hard_stop_loss": 0.25,
       "profit_threshold": 0.10,
       "max_quantile_spread": 0.20,
+      "min_median_return": 0.001,
+      "real_vol_oi_floor": 2.0,
+      "synth_vol_oi_floor": 0.5,
+      "synth_max_quantile_spread": 3.0,
       "max_concurrent_trades": 8,
       "metrics": {
         "sharpe": 1.85,
@@ -47,7 +51,7 @@
         "profit_factor": 2.40
       }
     },
-    
+
     "trend_breakout": {
       "strategy_type": "trend_breakout",
       "prob_threshold": 0.38,
@@ -56,6 +60,10 @@
       "hard_stop_loss": 0.25,
       "profit_threshold": 0.12,
       "min_median_return": 0.02,
+      "max_quantile_spread": 0.35,
+      "real_vol_oi_floor": 1.0,
+      "synth_vol_oi_floor": 0.3,
+      "synth_max_quantile_spread": 3.0,
       "max_concurrent_trades": 8,
       "metrics": {
         "sharpe": 1.53,
@@ -67,7 +75,7 @@
         "profit_factor": 2.16
       }
     },
-    
+
     "iv_regime_adaptive": {
       "strategy_type": "iv_regime_adaptive",
       "prob_threshold": 0.38,
@@ -75,6 +83,10 @@
       "kelly_cap": 0.12,
       "hard_stop_loss": 0.25,
       "profit_threshold": 0.11,
+      "max_quantile_spread": 0.35,
+      "real_vol_oi_floor": 1.0,
+      "synth_vol_oi_floor": 0.3,
+      "synth_max_quantile_spread": 3.0,
       "max_concurrent_trades": 8,
       "metrics": {
         "sharpe": 1.55,

@@ -6,6 +6,7 @@ Provides free market data via OpenBB ODP (yfinance + CBOE providers).
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import logging
 
 from routers import unusual_options, put_call_ratio, volume_concentration, iv_skew, technicals, ml_model
@@ -41,6 +42,35 @@ app.include_router(volume_concentration.router, prefix="/api", tags=["Volume Con
 app.include_router(iv_skew.router, prefix="/api", tags=["IV Skew API"])
 app.include_router(technicals.router, prefix="/api", tags=["Technicals API"])
 app.include_router(ml_model.router, prefix="/api", tags=["ML Model API"])
+
+
+async def tactical_bundle(
+    min_vol_oi: float = 2.0,
+    volcon_ticker: str = "SPY",
+    iv_ticker: str = "SPY",
+):
+    def _endpoint(router, path="/"):
+        for route in router.routes:
+            if hasattr(route, "path") and route.path == path:
+                return route.endpoint
+        raise RuntimeError(f"Endpoint {path} not found on router")
+
+    scanner, pcr, volcon, iv = await asyncio.gather(
+        asyncio.to_thread(_endpoint(unusual_options.router), min_vol_oi=min_vol_oi),
+        asyncio.to_thread(_endpoint(put_call_ratio.router)),
+        asyncio.to_thread(_endpoint(volume_concentration.router), ticker=volcon_ticker),
+        asyncio.to_thread(_endpoint(iv_skew.router), ticker=iv_ticker),
+    )
+    return {
+        "scanner": scanner,
+        "put_call_ratio": pcr,
+        "volume_concentration": volcon,
+        "iv_skew": iv,
+    }
+
+
+app.add_api_route("/api/v1/tactical-bundle", tactical_bundle, methods=["GET"])
+app.add_api_route("/api/tactical-bundle", tactical_bundle, methods=["GET"])
 
 
 @app.get("/health")

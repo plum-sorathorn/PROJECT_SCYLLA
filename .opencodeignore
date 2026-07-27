@@ -1,0 +1,37 @@
+﻿# Lockfiles & Package Managers
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lockb
+Cargo.lock
+Gemfile.lock
+poetry.lock
+
+# Dependencies & Environments
+node_modules/
+vendor/
+.venv/
+venv/
+env/
+
+# Build, Dist & Cache Outputs
+dist/
+build/
+.next/
+.nuxt/
+.out/
+coverage/
+.cache/
+*.min.js
+*.min.css
+*.map
+*.log
+
+# Large Assets & Data
+*.zip
+*.tar.gz
+*.exe
+*.dll
+*.so
+*.dylib
+*.iso

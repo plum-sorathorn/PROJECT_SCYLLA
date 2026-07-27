@@ -63,7 +63,11 @@ target_link_libraries(scylla_core
 
 # Optimization flags
 if(MSVC)
-    target_compile_options(scylla_core PRIVATE /O2 /EHsc)
+    target_compile_options(scylla_core PRIVATE /O2 /EHsc /GL)
+    target_link_options(scylla_core PRIVATE /LTCG)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|EM64T|x86_64")
+        target_compile_options(scylla_core PRIVATE /arch:AVX2)
+    endif()
 else()
     target_compile_options(scylla_core PRIVATE -O3 -Wall)
 endif()

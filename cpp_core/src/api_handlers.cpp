@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <future>
 #include <set>
+#include <chrono>
+#include <ctime>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -274,7 +276,7 @@ void registerRoutes(crow::SimpleApp& app) {
         return res;
     });
 
-    // ── Unusual options scanner (processed + enriched) ─────────────────────────
+    // ── Unusual options scanner (processed + enriched) [LEGACY] ────────────────
     CROW_ROUTE(app, "/api/scanner")
     .methods(crow::HTTPMethod::GET)
     ([&addCors](const crow::request& req) {
@@ -316,7 +318,7 @@ void registerRoutes(crow::SimpleApp& app) {
         return res;
     });
 
-    // ── Put/Call ratio ─────────────────────────────────────────────────────────
+    // ── Put/Call ratio [LEGACY] ────────────────────────────────────────────────
     CROW_ROUTE(app, "/api/put-call-ratio")
     .methods(crow::HTTPMethod::GET)
     ([&addCors](const crow::request& req) {
@@ -340,7 +342,7 @@ void registerRoutes(crow::SimpleApp& app) {
         return res;
     });
 
-    // ── Volume concentration by expiration ─────────────────────────────────────
+    // ── Volume concentration by expiration [LEGACY] ────────────────────────────
     CROW_ROUTE(app, "/api/volume-concentration")
     .methods(crow::HTTPMethod::GET)
     ([&addCors](const crow::request& req) {
@@ -368,7 +370,7 @@ void registerRoutes(crow::SimpleApp& app) {
         return res;
     });
 
-    // ── IV Skew / Sandbox ──────────────────────────────────────────────────────
+    // ── IV Skew / Sandbox [LEGACY] ────────────────────────────────────────────
     CROW_ROUTE(app, "/api/iv-skew")
     .methods(crow::HTTPMethod::GET)
     ([&addCors](const crow::request& req) {
@@ -397,6 +399,29 @@ void registerRoutes(crow::SimpleApp& app) {
             };
             res.set_header("Content-Type", "application/json");
             res.body = body.dump();
+        } catch (std::exception& e) {
+            res.code = 502;
+            res.body = json{{"error", e.what()}}.dump();
+        }
+        return res;
+    });
+
+    // ── Tactical bundle (consolidated: scanner + PCR + volcon + IV skew) ──────
+    CROW_ROUTE(app, "/api/tactical-bundle")
+    .methods(crow::HTTPMethod::GET)
+    ([&addCors](const crow::request& req) {
+        crow::response res;
+        addCors(res);
+        try {
+            double minVolOI = 2.0;
+            std::string volconTicker = "SPY";
+            std::string ivTicker = "SPY";
+            if (auto p = req.url_params.get("min_vol_oi")) { try { minVolOI = std::stod(p); } catch (...) {} }
+            if (auto p = req.url_params.get("volcon_ticker")) volconTicker = std::string(p);
+            if (auto p = req.url_params.get("iv_ticker")) ivTicker = std::string(p);
+            auto body = fetchTacticalBundle(minVolOI, volconTicker, ivTicker);
+            res.set_header("Content-Type", "application/json");
+            res.body = body;
         } catch (std::exception& e) {
             res.code = 502;
             res.body = json{{"error", e.what()}}.dump();
@@ -439,7 +464,8 @@ void registerRoutes(crow::SimpleApp& app) {
     ([resolveFrontendPath](const std::string& subpath) {
         std::string filePath = resolveFrontendPath(subpath);
         std::string content = readFile(filePath);
-        if (content.empty()) {
+        bool servedFromDisk = !content.empty();
+        if (!servedFromDisk) {
             std::string indexPath = resolveFrontendPath("index.html");
             content = readFile(indexPath);
         }
@@ -455,6 +481,31 @@ void registerRoutes(crow::SimpleApp& app) {
         else if (endsWith(subpath, ".png")) res.set_header("Content-Type", "image/png");
         else if (endsWith(subpath, ".svg")) res.set_header("Content-Type", "image/svg+xml");
         else res.set_header("Content-Type", "application/octet-stream");
+
+        if (servedFromDisk) {
+            if (endsWith(subpath, "index.html")) {
+                res.set_header("Cache-Control", "no-cache");
+            } else if (endsWith(subpath, ".js") || endsWith(subpath, ".css")) {
+                res.set_header("Cache-Control", "max-age=3600");
+            } else {
+                res.set_header("Cache-Control", "max-age=86400");
+            }
+            try {
+                auto ftime = fs::last_write_time(filePath);
+                auto fsize = fs::file_size(filePath);
+                std::time_t tt = std::chrono::system_clock::to_time_t(ftime);
+                std::tm tm_utc{};
+                gmtime_s(&tm_utc, &tt);
+                char date_buf[64];
+                std::strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", &tm_utc);
+                res.set_header("Last-Modified", date_buf);
+                std::ostringstream etag;
+                etag << '"' << std::hex << (static_cast<uint64_t>(fsize) ^ static_cast<uint64_t>(tt)) << '"';
+                res.set_header("ETag", etag.str());
+            } catch (...) {}
+        } else {
+            res.set_header("Cache-Control", "no-cache");
+        }
         return res;
     });
 }

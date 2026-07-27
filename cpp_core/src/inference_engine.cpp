@@ -7,6 +7,7 @@
 #include <future>
 #include <sstream>
 #include <chrono>
+#include <thread>
 
 #include <curl/curl.h>
 
@@ -23,10 +24,13 @@ size_t CurlWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
 }
 
 std::string HttpGet(const std::string& url) {
-    CURL* curl = curl_easy_init();
+    // Thread-local CURL handle keeps the connection pool alive across calls.
+    // Re-init only happens once per thread.
+    thread_local CURL* curl = curl_easy_init();
     if (!curl) return "";
 
     std::string read_buffer;
+    curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &read_buffer);
@@ -34,8 +38,6 @@ std::string HttpGet(const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L); // 5s timeout
 
     CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-
     if (res != CURLE_OK) return "";
     return read_buffer;
 }
@@ -68,6 +70,15 @@ bool InferenceEngine::load(const std::string& artifact_dir) {
         numeric_medians_ = meta["numeric_medians"].get<std::vector<double>>();
         ohe_categories_ = meta["ohe_categories"].get<std::vector<std::vector<std::string>>>();
 
+        numeric_feature_idx_.reserve(numeric_features_.size());
+        for (size_t i = 0; i < numeric_features_.size(); ++i) {
+            numeric_feature_idx_[numeric_features_[i]] = i;
+        }
+        cat_feature_idx_.reserve(categorical_features_.size());
+        for (size_t i = 0; i < categorical_features_.size(); ++i) {
+            cat_feature_idx_[categorical_features_[i]] = i;
+        }
+
         total_feature_dim_ = static_cast<int>(numeric_features_.size());
         for (const auto& cat_list : ohe_categories_) {
             total_feature_dim_ += static_cast<int>(cat_list.size());
@@ -98,55 +109,49 @@ std::vector<double> InferenceEngine::vectorize_features(
     double resolved_hv,
     double resolved_vix
 ) const {
-    std::unordered_map<std::string, double> raw_num;
-    raw_num["underlier_price"] = input.underlier_price;
-    raw_num["strike"] = input.strike;
-    raw_num["volume"] = input.volume;
-    raw_num["open_interest"] = input.open_interest;
-    raw_num["implied_vol"] = input.implied_vol;
-    raw_num["premium"] = input.premium;
-    raw_num["dte"] = input.dte;
+    std::vector<double> row_numeric(numeric_features_.size(), 0.0);
+    auto set_num = [&](const char* name, double v) {
+        auto it = numeric_feature_idx_.find(name);
+        if (it != numeric_feature_idx_.end()) row_numeric[it->second] = v;
+    };
+    set_num("underlier_price", input.underlier_price);
+    set_num("strike",          input.strike);
+    set_num("volume",          input.volume);
+    set_num("open_interest",   input.open_interest);
+    set_num("implied_vol",     input.implied_vol);
+    set_num("premium",         input.premium);
+    set_num("dte",             input.dte);
+    set_num("vol_oi_ratio",    input.volume / (input.open_interest + 1e-6));
+    set_num("moneyness",       (input.underlier_price > 0.0) ? (input.strike / input.underlier_price) : 1.0);
+    set_num("iv_hv_ratio",     input.implied_vol / (resolved_hv + 1e-6));
+    set_num("hist_vol",        resolved_hv);
+    set_num("vix_level",       resolved_vix);
 
-    double vol_oi = input.volume / (input.open_interest + 1e-6);
-    raw_num["vol_oi_ratio"] = vol_oi;
-
-    double moneyness = (input.underlier_price > 0.0) ? (input.strike / input.underlier_price) : 1.0;
-    raw_num["moneyness"] = moneyness;
-
-    double iv_hv = input.implied_vol / (resolved_hv + 1e-6);
-    raw_num["iv_hv_ratio"] = iv_hv;
-
-    raw_num["hist_vol"] = resolved_hv;
-    raw_num["vix_level"] = resolved_vix;
+    std::vector<std::string> row_cat(categorical_features_.size());
+    auto set_cat = [&](const char* name, const std::string& v) {
+        auto it = cat_feature_idx_.find(name);
+        if (it != cat_feature_idx_.end()) row_cat[it->second] = v;
+    };
+    set_cat("ticker",           input.ticker);
+    set_cat("option_type",      input.option_type);
+    set_cat("side",             input.side);
+    set_cat("is_weekly",        input.is_weekly);
+    set_cat("trend_alignment",  input.trend_alignment);
 
     std::vector<double> vec;
     vec.reserve(total_feature_dim_);
 
-    // 1. Numeric features with median imputation
     for (size_t i = 0; i < numeric_features_.size(); ++i) {
-        const auto& name = numeric_features_[i];
-        auto it = raw_num.find(name);
-        double val = (it != raw_num.end()) ? it->second : numeric_medians_[i];
+        double val = row_numeric[i];
         if (std::isnan(val) || std::isinf(val)) {
             val = numeric_medians_[i];
         }
         vec.push_back(val);
     }
 
-    // 2. Categorical features with One-Hot Encoding
-    std::unordered_map<std::string, std::string> raw_cat;
-    raw_cat["ticker"] = input.ticker;
-    raw_cat["option_type"] = input.option_type;  // "Call" or "Put"
-    raw_cat["side"] = input.side;                 // "BUY" or "SELL"
-    raw_cat["is_weekly"] = input.is_weekly;
-    raw_cat["trend_alignment"] = input.trend_alignment;
-
     for (size_t i = 0; i < categorical_features_.size(); ++i) {
-        const auto& cat_name = categorical_features_[i];
-        const auto& valid_cats = ohe_categories_[i];
-        std::string val = raw_cat.count(cat_name) ? raw_cat.at(cat_name) : "";
-
-        for (const auto& category_label : valid_cats) {
+        const std::string& val = row_cat[i];
+        for (const auto& category_label : ohe_categories_[i]) {
             vec.push_back((val == category_label) ? 1.0 : 0.0);
         }
     }
@@ -214,14 +219,32 @@ std::vector<QuantilePrediction> InferenceEngine::predict_quantiles_batch(
 
     if (num_rows == 0) return results;
 
-    // Parallel quantile predictions across matrix rows using std::async
-    std::vector<std::future<void>> futures;
-    futures.reserve(num_rows);
+    constexpr size_t PARALLEL_THRESHOLD = 100;
 
-    for (size_t r = 0; r < num_rows; ++r) {
-        futures.push_back(std::async(std::launch::async, [this, &feature_matrix, &results, r]() {
+    if (num_rows < PARALLEL_THRESHOLD) {
+        for (size_t r = 0; r < num_rows; ++r) {
             results[r] = predict_single_booster_set(feature_matrix[r]);
-        }));
+        }
+        return results;
+    }
+
+    size_t n_threads = std::min(num_rows, std::thread::hardware_concurrency());
+    if (n_threads == 0) n_threads = 1;
+    size_t chunk = (num_rows + n_threads - 1) / n_threads;
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(n_threads);
+
+    for (size_t t = 0; t < n_threads; ++t) {
+        size_t start = t * chunk;
+        if (start >= num_rows) break;
+        size_t end = std::min(start + chunk, num_rows);
+        futures.push_back(std::async(std::launch::async,
+            [this, &feature_matrix, &results, start, end]() {
+                for (size_t r = start; r < end; ++r) {
+                    results[r] = predict_single_booster_set(feature_matrix[r]);
+                }
+            }));
     }
 
     for (auto& fut : futures) {
@@ -292,10 +315,15 @@ StrategyOutput InferenceEngine::derive_strategy(
 }
 
 double InferenceEngine::fetch_hv(const std::string& ticker) const {
-    std::lock_guard<std::mutex> lock(hv_cache_mutex_);
-    auto it = hv_cache_.find(ticker);
-    if (it != hv_cache_.end()) {
-        return it->second;
+    // Release the mutex before the HTTP call so parallel batch predict for
+    // N different tickers does not serialize on this lock.
+    // Double-checked pattern: read cache under lock, fetch without lock, re-acquire to insert.
+    {
+        std::lock_guard<std::mutex> lock(hv_cache_mutex_);
+        auto it = hv_cache_.find(ticker);
+        if (it != hv_cache_.end()) {
+            return it->second;
+        }
     }
 
     std::string url = "https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?range=3mo&interval=1d";
@@ -338,7 +366,12 @@ double InferenceEngine::fetch_hv(const std::string& ticker) const {
         }
     }
 
-    hv_cache_[ticker] = calculated_hv;
+    {
+        std::lock_guard<std::mutex> lock(hv_cache_mutex_);
+        // Another thread may have inserted the same ticker in the meantime — accept either value
+        // (the fallback is 25.0 if HTTP failed; duplicates are cheap, the cache is correct).
+        hv_cache_[ticker] = calculated_hv;
+    }
     return calculated_hv;
 }
 

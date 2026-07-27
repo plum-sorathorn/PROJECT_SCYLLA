@@ -530,17 +530,17 @@ function renderVolConChart() {
         {
           label: 'Call Volume',
           data: callVols,
-          backgroundColor: '#e8f5e9',
-          borderColor: '#2d7a4a',
-          borderWidth: 0.5,
+          backgroundColor: '#2d7a4a',
+          borderColor: '#1f5a36',
+          borderWidth: 1,
           stack: 'vol',
         },
         {
           label: 'Put Volume',
           data: putVols,
-          backgroundColor: '#ffebee',
-          borderColor: '#8b3a3a',
-          borderWidth: 0.5,
+          backgroundColor: '#8b3a3a',
+          borderColor: '#5e2828',
+          borderWidth: 1,
           stack: 'vol',
         },
       ],
@@ -771,14 +771,57 @@ function chartDefaults({ title = '', xLabel = '', yLabel = '', stacked = false }
   };
 }
 
+async function fetchTacticalBundle(minVolOI, volconTicker, ivTicker) {
+  setLoading('scanner-loading', true);
+  setLoading('pcr-loading', true);
+  setLoading('volcon-loading', true);
+  setLoading('iv-loading', true);
+  try {
+    const params = new URLSearchParams({
+      min_vol_oi: String(minVolOI),
+      volcon_ticker: volconTicker,
+      iv_ticker: ivTicker,
+    });
+    const r = await fetch(`${API_BASE}/api/tactical-bundle?${params}`, { signal: AbortSignal.timeout(30000) });
+    const bundle = await r.json();
+    if (bundle.scanner) {
+      state.scannerData = bundle.scanner.data || [];
+      if (bundle.scanner.summary) updateSummary(bundle.scanner.summary);
+      renderScannerTable();
+      if (typeof updateExpectedMovePanel === 'function') updateExpectedMovePanel();
+    }
+    if (bundle.put_call_ratio) {
+      state.pcrData = bundle.put_call_ratio.data || {};
+      renderPCRChart();
+    }
+    if (bundle.volume_concentration) {
+      state.volConData = bundle.volume_concentration.data || [];
+      renderVolConChart();
+    }
+    if (bundle.iv_skew) {
+      state.ivData = bundle.iv_skew;
+      renderIVGauges();
+      renderIVSmileChart();
+    }
+  } catch (e) {
+    console.error('[SCYLLA] tactical-bundle fetch failed:', e);
+  } finally {
+    setLoading('scanner-loading', false);
+    setLoading('pcr-loading', false);
+    setLoading('volcon-loading', false);
+    setLoading('iv-loading', false);
+  }
+}
+
 async function refreshTactical() {
   await Promise.all([
-    fetchScanner(parseFloat($('filter-minvoloi').value) || 2.0),
-    fetchPCR(),
-    fetchVolCon($('volcon-ticker').value || 'SPY'),
-    fetchIVSkew($('iv-ticker').value || 'SPY'),
+    fetchTacticalBundle(
+      parseFloat($('filter-minvoloi').value) || 2.0,
+      $('volcon-ticker').value || 'SPY',
+      $('iv-ticker').value || 'SPY',
+    ),
+    fetchSwingAlignment(),
   ]);
-  await fetchSwingAlignment();
 }
 
 
@@ -2058,6 +2101,51 @@ async function loadDefaultBacktestCache() {
     setLoading('backtest-loading', false);
     state.booting = false;
   }
+  fetchDatasetInfo();
+  const synthToggle = $('bt-use-synthetic');
+  if (synthToggle && !synthToggle.dataset.scyllaDatasetWired) {
+    synthToggle.dataset.scyllaDatasetWired = '1';
+    synthToggle.addEventListener('change', () => { fetchDatasetInfo(); });
+  }
+}
+
+let _lastDatasetInfo = null;
+
+function applyDatasetInfoToSlider(info) {
+  if (!info) return;
+  const slider = $('bt-lookback-days');
+  if (!slider) return;
+  const span = Number(info.data_span_days) || 0;
+  if (span <= 0) {
+    slider.max = 0;
+    slider.value = 0;
+    return;
+  }
+  const step = Number(slider.step) || 30;
+  const newMax = Math.max(step, Math.ceil(span / step) * step);
+  const curVal = Number(slider.value) || 0;
+  slider.max = String(newMax);
+  if (curVal > newMax) {
+    slider.value = String(newMax);
+    const display = $('bt-lookback-display');
+    if (display) {
+      const yrs = (newMax / 365).toFixed(1);
+      display.textContent = `LAST ${yrs} YR (${newMax} D)`;
+    }
+  }
+}
+
+async function fetchDatasetInfo() {
+  try {
+    const useSyntheticFlag = $('bt-use-synthetic')?.checked ?? true;
+    const r = await fetch(`${API_BASE}/api/ml/dataset-info?use_synthetic=${useSyntheticFlag}`);
+    if (!r.ok) return;
+    const info = await r.json();
+    _lastDatasetInfo = info;
+    applyDatasetInfoToSlider(info);
+  } catch (err) {
+    console.warn('fetchDatasetInfo failed:', err.message);
+  }
 }
 
 async function runBacktestSimulation(e) {
@@ -2338,6 +2426,37 @@ function loadBacktestData(data) {
   const tradeDaysEl = $('bt-sum-tradedays');
   if (tradeDaysEl && data.summary?.trade_days_used_for_sharpe !== undefined) {
     tradeDaysEl.textContent = data.summary.trade_days_used_for_sharpe;
+  }
+
+  // Data span tile — populated from the backtest response (covers the case
+  // where dataset-info wasn't fetched yet, e.g. first backtest before page-load fetch).
+  if (data.data_span_days !== undefined) {
+    applyDatasetInfoToSlider({
+      data_span_days: data.data_span_days,
+      data_count: data.data_count,
+      is_synthetic_filter: data.is_synthetic_filter,
+    });
+  }
+  const spanEl = $('bt-sum-dataspan');
+  const spanSubEl = $('bt-sum-dataspan-sub');
+  if (spanEl) {
+    const spanDays = Number(data.data_span_days) || 0;
+    if (spanDays > 0) {
+      const years = spanDays / 365.0;
+      spanEl.textContent = years >= 1.0
+        ? `${years.toFixed(1)} yr`
+        : `${spanDays} d`;
+    } else {
+      spanEl.textContent = '--';
+    }
+  }
+  if (spanSubEl) {
+    const ds = data.data_start || '----';
+    const de = data.data_end || '----';
+    const cnt = Number(data.data_count) || 0;
+    const cntStr = cnt >= 1000 ? `${(cnt / 1000).toFixed(cnt >= 10000 ? 0 : 1)}K` : String(cnt);
+    const tag = data.is_synthetic_filter ? 'synthetic' : 'real';
+    spanSubEl.textContent = `${ds} → ${de} · ${cntStr} trades (${tag})`;
   }
   
   const sumCard = $('card-backtest-summary');
