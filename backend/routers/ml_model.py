@@ -10,6 +10,7 @@ import yfinance as yf
 import pickle
 import joblib
 import lightgbm as lgb
+import requests
 import logging
 from .ml_derivations import compute_calibrated_p_success, classify_strategy, kelly_fraction, kelly_fraction_realized
 
@@ -1505,6 +1506,7 @@ def _save_prediction_cache(input_hash: str, model_version: str, prediction_dict:
 def api_predict(req: PredictRequestSchema):
     # PHASE C (PARALLELIZATION_PLAN Step 18): Delegate prediction to C++ native Crow engine (:8080)
     try:
+        is_weekly_val = bool(getattr(req, "isWeekly", getattr(req, "is_weekly", False)))
         payload = {
             "ticker": (req.ticker or "SPY").upper(),
             "underlier_price": float(req.underlierPrice),
@@ -1515,7 +1517,7 @@ def api_predict(req: PredictRequestSchema):
             "premium": float(req.premium),
             "side": str(req.side).upper(),
             "dte": float(req.dte),
-            "is_weekly": "True" if req.isWeekly else "False",
+            "is_weekly": "True" if is_weekly_val else "False",
             "trend_alignment": str(req.trendAlignment)
         }
         resp = requests.post("http://127.0.0.1:8080/api/v1/ml/predict", json=payload, timeout=5)
