@@ -401,35 +401,56 @@ void registerRoutes(crow::SimpleApp& app) {
         return res;
     });
 
+    // Helper: resolve relative path to frontend asset across standard locations
+    auto resolveFrontendPath = [](const std::string& relativeFile) -> std::string {
+        std::vector<std::string> candidates = {
+            "../frontend/" + relativeFile,
+            "frontend/" + relativeFile,
+            "../../frontend/" + relativeFile,
+            "../frontend/dist/" + relativeFile,
+            "frontend/dist/" + relativeFile
+        };
+        for (const auto& path : candidates) {
+            if (fs::exists(path)) {
+                return path;
+            }
+        }
+        return "";
+    };
+
     // ── Serve static frontend ──────────────────────────────────────────────────
     CROW_ROUTE(app, "/")
-    ([]() {
-        std::string html = readFile("../frontend/dist/index.html");
+    ([resolveFrontendPath]() {
+        std::string path = resolveFrontendPath("index.html");
+        std::string html = readFile(path);
         if (html.empty()) {
-            return crow::response(404, "Frontend not built. Run: npm run build in /frontend");
+            return crow::response(404, "Frontend asset index.html not found in frontend/ directory.");
         }
         crow::response res(html);
         res.set_header("Content-Type", "text/html; charset=utf-8");
         return res;
     });
 
-    // Fallback route for SPA
+    // Fallback route for static assets & SPA
     CROW_ROUTE(app, "/<path>")
-    ([](const std::string& path) {
-        std::string filePath = "../frontend/dist/" + path;
+    ([resolveFrontendPath](const std::string& subpath) {
+        std::string filePath = resolveFrontendPath(subpath);
         std::string content = readFile(filePath);
         if (content.empty()) {
-            content = readFile("../frontend/dist/index.html");
+            std::string indexPath = resolveFrontendPath("index.html");
+            content = readFile(indexPath);
         }
-        if (content.empty()) return crow::response(404, "Not found");
+        if (content.empty()) return crow::response(404, "Asset not found");
         crow::response res(content);
         auto endsWith = [](const std::string& str, const std::string& suffix) {
             return str.size() >= suffix.size() &&
                    str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
         };
-        if (endsWith(path, ".js"))  res.set_header("Content-Type", "application/javascript");
-        else if (endsWith(path, ".css")) res.set_header("Content-Type", "text/css");
-        else if (endsWith(path, ".html")) res.set_header("Content-Type", "text/html");
+        if (endsWith(subpath, ".js"))  res.set_header("Content-Type", "application/javascript");
+        else if (endsWith(subpath, ".css")) res.set_header("Content-Type", "text/css");
+        else if (endsWith(subpath, ".html")) res.set_header("Content-Type", "text/html");
+        else if (endsWith(subpath, ".png")) res.set_header("Content-Type", "image/png");
+        else if (endsWith(subpath, ".svg")) res.set_header("Content-Type", "image/svg+xml");
         else res.set_header("Content-Type", "application/octet-stream");
         return res;
     });

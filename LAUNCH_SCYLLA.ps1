@@ -98,15 +98,31 @@ if (Test-Path $APP_JS) {
     Set-Content $APP_JS $Content -NoNewline
 }
 
+# -- Auto-Build C++ Core Engine if missing ----------------------------
+if (!(Test-Path $CPP_EXE) -and (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    Write-Host "[SETUP] C++ Core engine binary not found. Building native C++ Crow engine..." -ForegroundColor Yellow
+    Write-Host "        Executing CMake Release build via MSVC..."
+    $BUILD_DIR = Join-Path $ROOT "cpp_core\build"
+    if (!(Test-Path $BUILD_DIR)) { New-Item -ItemType Directory -Path $BUILD_DIR -Force | Out-Null }
+    
+    # Run CMake configuration & parallel build
+    Start-Process cmake -ArgumentList ".. -G `"Visual Studio 18 2026`" -A x64 -DCMAKE_BUILD_TYPE=Release" -WorkingDirectory $BUILD_DIR -Wait -NoNewWindow -ErrorAction SilentlyContinue
+    if (!(Test-Path $CPP_EXE)) {
+        # Fallback to VS 2022 generator if VS 2026 generator syntax varies
+        Start-Process cmake -ArgumentList ".. -G `"Visual Studio 17 2022`" -A x64 -DCMAKE_BUILD_TYPE=Release" -WorkingDirectory $BUILD_DIR -Wait -NoNewWindow -ErrorAction SilentlyContinue
+    }
+    Start-Process cmake -ArgumentList "--build . --config Release --parallel" -WorkingDirectory $BUILD_DIR -Wait -NoNewWindow -ErrorAction SilentlyContinue
+}
+
 # -- Launch UI / Processing Nodes ------------------------------------
 if (Test-Path $CPP_EXE) {
-    Write-Host "[2/3] C++ Core binary found. Initializing runtime metrics matrix on port 8080..." -ForegroundColor Cyan
+    Write-Host "[2/3] Native C++ LightGBM Engine binary active. Initializing port 8080..." -ForegroundColor Cyan
     Start-Process $CPP_EXE -WorkingDirectory (Join-Path $ROOT "cpp_core") -WindowStyle Normal
     Start-Sleep -Seconds 2
-    Write-Host "[3/3] Launching Web Interface..."
+    Write-Host "[3/3] Launching Cyberpunk Web Interface..."
     Start-Process "http://127.0.0.1:8080/"
 } else {
-    Write-Host "[2/3] DEV MODE - C++ binary structural path unbuilt. Routing frontend directly to ODP layer." -ForegroundColor Yellow
+    Write-Host "[2/3] DEV MODE - C++ core unbuilt. Serving frontend directly via Python ODP layer." -ForegroundColor Yellow
     Write-Host "[3/3] Launching Web Interface on http://127.0.0.1:6900/..."
     Start-Process "http://127.0.0.1:6900/"
 }
@@ -114,15 +130,16 @@ if (Test-Path $CPP_EXE) {
 # -- Print System Status Block ---------------------------------------
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   SCYLLA METRICS ENGINE IS ONLINE" -ForegroundColor Green
+Write-Host "   SCYLLA HYBRID 3-TIER ENGINE IS ONLINE" -ForegroundColor Green
+Write-Host "   (No NPM/Node build required — Native HTML/JS + C++ Crow)" -ForegroundColor DarkGray
 Write-Host ""
 if (Test-Path $CPP_EXE) {
-    Write-Host "   ODP Interface : http://127.0.0.1:6900"
-    Write-Host "   C++ Engine    : http://127.0.0.1:8080"
-    Write-Host "   Dashboard UI  : http://127.0.0.1:8080/"
+    Write-Host "   Python ODP Gateway : http://127.0.0.1:6900"
+    Write-Host "   C++ Native Engine  : http://127.0.0.1:8080"
+    Write-Host "   Dashboard Terminal : http://127.0.0.1:8080/"
 } else {
-    Write-Host "   ODP Interface : http://127.0.0.1:6900"
-    Write-Host "   Dashboard UI  : Static tracking pipeline initialized via browser index."
+    Write-Host "   Python ODP Gateway : http://127.0.0.1:6900"
+    Write-Host "   Dashboard Terminal : http://127.0.0.1:6900/"
 }
 Write-Host ""
 Write-Host "   Termination sequence: Close background application shells manually."
