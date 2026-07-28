@@ -15,6 +15,7 @@ import httpx
 import requests
 import logging
 from .ml_derivations import compute_calibrated_p_success, classify_strategy, kelly_fraction, kelly_fraction_realized
+from ._yf_safe import safe_call
 
 import threading
 import concurrent.futures
@@ -354,8 +355,8 @@ def _fetch_historical_volatility(ticker: str) -> float:
     if ticker in _hv_cache:
         return _hv_cache[ticker]
     try:
-        tk = yf.Ticker(ticker)
-        hist = tk.history(period="3mo")
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        hist = safe_call(lambda t: t.history(period="3mo"), tk)
         if hist.empty or len(hist) < 5:
             _hv_cache[ticker] = 0.0
             return 0.0
@@ -379,8 +380,8 @@ def _fetch_vix_level() -> float:
         if elapsed < 300:  # 5-minute cache
             return _vix_cache["value"]
     try:
-        vix = yf.Ticker("^VIX")
-        hist = vix.history(period="5d")
+        vix = safe_call(yf.Ticker, "^VIX", retries=1)
+        hist = safe_call(lambda t: t.history(period="5d"), vix)
         if hist.empty:
             _vix_cache["value"] = 20.0
             _vix_cache["ts"] = now
@@ -1193,9 +1194,9 @@ def api_label_trades(
                 min_date = min(dates)
                 max_date = max(dates) + datetime.timedelta(days=effective_horizon + 2)
 
-                tk = yf.Ticker(ticker)
-                hist = tk.history(start=min_date.strftime("%Y-%m-%d"),
-                                  end=max_date.strftime("%Y-%m-%d"))
+                tk = safe_call(yf.Ticker, ticker, retries=1)
+                hist = safe_call(lambda t: t.history(start=min_date.strftime("%Y-%m-%d"),
+                                  end=max_date.strftime("%Y-%m-%d")), tk)
 
                 if hist.empty:
                     return rows
@@ -1943,9 +1944,58 @@ def get_real_trades(conn, **filters) -> pd.DataFrame:
     return pd.read_sql_query(query, conn, params=params)
 
 
+from config._strategy_loader import get_strategy_params, get_common_params
+
+
+def _resolve_strategy_defaults(req: "BacktestRequestSchema") -> dict:
+    """
+    Resolve BacktestRequestSchema fields that are None to the value from
+    backend/config/strategy_defaults.json. Explicit values in req take precedence
+    so per-request overrides still work.
+
+    Returns a dict with the resolved values; the request object is NOT mutated.
+    """
+    strat = get_strategy_params(req.strategy_type or "vol_regime")
+    common = get_common_params()
+
+    def pick(field, file_key, kind="strat", default=None):
+        v = getattr(req, field, None)
+        if v is not None:
+            return v
+        return (strat if kind == "strat" else common).get(file_key, default)
+
+    return {
+        "initial_capital":            pick("initial_capital", "initial_capital", "common", 100000.0),
+        "prob_threshold":             pick("prob_threshold", "prob_threshold", "strat", 0.40),
+        "kelly_multiplier":           pick("kelly_multiplier", "kelly_multiplier", "strat", 0.75),
+        "kelly_cap":                  pick("kelly_cap", "kelly_cap", "strat", 0.05),
+        "stop_lambda":                pick("stop_lambda", "stop_lambda", "strat", 1.5),
+        "max_risk_pct_per_trade":     pick("max_risk_pct_per_trade", "max_risk_pct_per_trade", "common", 0.02),
+        "walkforward_train_window":   pick("walkforward_train_window", "walkforward_train_window", "common", 500),
+        "walkforward_test_increment": pick("walkforward_test_increment", "walkforward_test_increment", "common", 250),
+        "max_concurrent_trades":      pick("max_concurrent_trades", "max_concurrent_trades", "strat", 12),
+        "scan_time":                  pick("scan_time", "scan_time", "common", "10:00:00"),
+        "min_kelly_fraction":         pick("min_kelly_fraction", "min_kelly_fraction", "common", 0.01),
+        "hard_stop_loss":             pick("hard_stop_loss", "hard_stop_loss", "strat", 0.04),
+        "lookback_days":              pick("lookback_days", "lookback_days", "common", None),
+        "profit_threshold":           pick("profit_threshold", "profit_threshold", "strat", 0.05),
+        "max_quantile_spread":        pick("max_quantile_spread", "max_quantile_spread", "strat", 0.0),
+        "min_median_return":          pick("min_median_return", "min_median_return", "strat", 0.0),
+        "slippage_pct":               pick("slippage_pct", "slippage_pct", "common", 0.01),
+        "max_iv":                     pick("max_iv", "max_iv", "strat", 150.0),
+    }
+
+
 class BacktestRequestSchema(BaseModel):
     mode: Optional[str] = "walkforward"
-    initial_capital: Optional[float] = 100000.0
+    # Single source of truth: the per-strategy and common fields below default to None
+    # and are resolved at request-handling time by `_resolve_strategy_defaults(req)`
+    # from backend/config/strategy_defaults.json (see _strategy_loader.py). Explicit
+    # values supplied in the request body take precedence so per-request overrides
+    # still work. The defensive fallbacks inside `_resolve_strategy_defaults` match
+    # the prior hardcoded schema defaults, so behaviour is unchanged for any
+    # strategy_type or field absent from the JSON file (or if the file is missing).
+    initial_capital: Optional[float] = None
     # Probability calibration target used to map predicted return distribution -> p_success.
     # Decoupled from profit_threshold (take-profit cap) to avoid circular over-restriction.
     calibration_target_pct: Optional[float] = 0.025
@@ -1956,30 +2006,33 @@ class BacktestRequestSchema(BaseModel):
     # reserved in the schema and the cache key so a future binary-label refactor won't
     # invalidate the predictions cache.
     walkforward_label_threshold: Optional[float] = 0.5
-    prob_threshold: Optional[float] = 0.40
-    kelly_multiplier: Optional[float] = 0.80
-    kelly_cap: Optional[float] = 0.05          # PHASE A: was 0.20 — tighten to cap tail risk
-    stop_lambda: Optional[float] = 1.5
-    max_risk_pct_per_trade: Optional[float] = 0.02
-    walkforward_train_window: Optional[int] = 500
-    walkforward_test_increment: Optional[int] = 250  # PHASE A: 250 = synthetic-tuned optimal (recycle bin cache v2_settlement_500_250_68802_0.5_0.025_0_None.pkl). 100 is too slow on 68k trades (~683 steps, 15-30 min).
+    prob_threshold: Optional[float] = None
+    kelly_multiplier: Optional[float] = None
+    kelly_cap: Optional[float] = None           # PHASE A: was 0.20 — tighten to cap tail risk
+    stop_lambda: Optional[float] = None
+    max_risk_pct_per_trade: Optional[float] = None
+    walkforward_train_window: Optional[int] = None
+    walkforward_test_increment: Optional[int] = None  # PHASE A: 250 = synthetic-tuned optimal (recycle bin cache v2_settlement_500_250_68802_0.5_0.025_0_None.pkl). 100 is too slow on 68k trades (~683 steps, 15-30 min).
     confirm_direct_dev: Optional[bool] = False
     strategy_type: Optional[str] = "whale_quality"  # PHASE A: default to new strategy
-    max_concurrent_trades: Optional[int] = 12  # PHASE A: was 8 — allow more concurrent (with tighter Kelly)
-    scan_time: Optional[str] = "10:00:00"
-    min_kelly_fraction: Optional[float] = 0.01
+    max_concurrent_trades: Optional[int] = None  # PHASE A: was 8 — allow more concurrent (with tighter Kelly)
+    scan_time: Optional[str] = None
+    min_kelly_fraction: Optional[float] = None
     lookback_days: Optional[int] = None
-    profit_threshold: Optional[float] = 0.50  # PHASE A (synthetic-tuned): 50% captures the 28.77% of synth trades with observed_return >= 50% (mean winner return +0.99) — lottery-ticket payoff structure verified by scripts/verify_phase_a.py
-    max_quantile_spread: Optional[float] = 0.35
-    min_median_return: Optional[float] = 0.015
-    slippage_pct: Optional[float] = 0.01
-    max_iv: Optional[float] = 100.0
+    # Take-profit cap for the BACKTEST (the +X% return at which a winning trade is closed).
+    # Intentionally decoupled from ml_settings.profit_threshold (ML training label
+    # threshold, see comment in api_backtest). Resolved from strategy_defaults.json.
+    profit_threshold: Optional[float] = None
+    max_quantile_spread: Optional[float] = None
+    min_median_return: Optional[float] = None
+    slippage_pct: Optional[float] = None
+    max_iv: Optional[float] = None
     min_open_interest: Optional[int] = 100
     min_dte: Optional[int] = 7
     max_dte: Optional[int] = 60
     data_start_idx: Optional[int] = 0  # PHASE A: default 0 (start of dataset) so default cache_key matches existing on-disk caches (e.g. ..._0_None.pkl). Legacy default of None produced a non-matching ..._None_None key.
     data_end_idx: Optional[int] = None  # None = use all data through end of dataset.
-    hard_stop_loss: Optional[float] = 0.04  # PHASE A pass 3: was 0.06 — tighter stop OK because hold_to_horizon is no longer catastrophic
+    hard_stop_loss: Optional[float] = None  # PHASE A pass 3: was 0.06 — tighter stop OK because hold_to_horizon is no longer catastrophic
     # Plan 1A: per-strategy threshold overrides (JSON-driven). The PHASE A new
     # strategies previously hardcoded these; they now read from the request so
     # config/strategy_defaults.json becomes the single source of truth.
@@ -2135,13 +2188,17 @@ def api_backtest(req: BacktestRequestSchema):
             detail="direct_dev mode requires explicit confirm_direct_dev=true — results are in-sample and not valid for strategy validation"
         )
 
+    # Resolve per-strategy + common defaults from backend/config/strategy_defaults.json.
+    # Single source of truth — explicit values in the request still take precedence.
+    resolved = _resolve_strategy_defaults(req)
+
     # Check response cache — include ALL strategy-discriminating params to avoid cross-strategy cache collisions
     cache_key_resp = (
-        f"{req.mode}_{req.initial_capital}_{req.prob_threshold}_{req.kelly_multiplier}_"
-        f"{req.kelly_cap}_{req.stop_lambda}_{req.max_risk_pct_per_trade}_{req.walkforward_train_window}_"
-        f"{req.walkforward_test_increment}_{req.strategy_type}_{req.max_concurrent_trades}_"
-        f"{req.scan_time}_{req.min_kelly_fraction}_{req.hard_stop_loss}_{req.lookback_days}_"
-        f"{req.profit_threshold}_{req.calibration_target_pct}_{req.max_quantile_spread}_{req.min_median_return}_{req.slippage_pct}_{req.max_iv}_{req.min_open_interest}"
+        f"{req.mode}_{resolved['initial_capital']}_{resolved['prob_threshold']}_{resolved['kelly_multiplier']}_"
+        f"{resolved['kelly_cap']}_{resolved['stop_lambda']}_{resolved['max_risk_pct_per_trade']}_{resolved['walkforward_train_window']}_"
+        f"{resolved['walkforward_test_increment']}_{req.strategy_type}_{resolved['max_concurrent_trades']}_"
+        f"{resolved['scan_time']}_{resolved['min_kelly_fraction']}_{resolved['hard_stop_loss']}_{resolved['lookback_days']}_"
+        f"{resolved['profit_threshold']}_{req.calibration_target_pct}_{resolved['max_quantile_spread']}_{resolved['min_median_return']}_{resolved['slippage_pct']}_{resolved['max_iv']}_{req.min_open_interest}"
         f"_{req.min_dte}_{req.max_dte}_{req.data_start_idx}_{req.data_end_idx}_{int(bool(req.use_synthetic))}"
     )
     if cache_key_resp in _backtest_response_cache:
@@ -2153,8 +2210,9 @@ def api_backtest(req: BacktestRequestSchema):
     # is closed). This is intentionally decoupled from the ml_settings.profit_threshold DB value, which
     # is the ML training label threshold (the return above which a trade is labelled "successful" for
     # supervised learning). They serve different purposes and intentionally do not share a default.
+    # Resolved from strategy_defaults.json per-strategy block via _resolve_strategy_defaults.
     settings = _get_settings()
-    profit_threshold = req.profit_threshold if req.profit_threshold is not None else 0.08
+    profit_threshold = resolved["profit_threshold"]
     # Plan 1A: walkforward label threshold is independent of the take-profit cap.
     # Default 0.5 matches the existing on-disk 96 MB walkforward cache, so changing
     # `profit_threshold` (the backtest take-profit cap) no longer invalidates the
@@ -2364,32 +2422,33 @@ def api_backtest(req: BacktestRequestSchema):
         raise HTTPException(status_code=400, detail=f"Unsupported mode: {req.mode}")
 
     # Sizing and exit params
-    # Defaults mirror BacktestRequestSchema — single source of truth.
+    # Resolved from backend/config/strategy_defaults.json via _resolve_strategy_defaults.
     # Convention: if hard_stop_loss <= 1.0 treat as fraction directly; if > 1.0 treat as percentage and divide by 100.
-    prob_threshold = req.prob_threshold
-    kelly_multiplier = req.kelly_multiplier
-    kelly_cap = req.kelly_cap
-    stop_lambda = req.stop_lambda
-    max_risk_pct_per_trade = req.max_risk_pct_per_trade
+    prob_threshold = resolved["prob_threshold"]
+    kelly_multiplier = resolved["kelly_multiplier"]
+    kelly_cap = resolved["kelly_cap"]
+    stop_lambda = resolved["stop_lambda"]
+    max_risk_pct_per_trade = resolved["max_risk_pct_per_trade"]
     strategy_type = req.strategy_type
-    max_concurrent_trades = req.max_concurrent_trades
-    scan_time = req.scan_time
-    min_kelly_fraction = req.min_kelly_fraction
-    _raw_hsl = req.hard_stop_loss
+    max_concurrent_trades = resolved["max_concurrent_trades"]
+    scan_time = resolved["scan_time"]
+    min_kelly_fraction = resolved["min_kelly_fraction"]
+    _raw_hsl = resolved["hard_stop_loss"]
     hard_stop_loss = _raw_hsl if _raw_hsl <= 1.0 else _raw_hsl / 100.0
-    max_quantile_spread = req.max_quantile_spread
-    min_median_return = req.min_median_return
-    slippage_pct = req.slippage_pct
-    max_iv = req.max_iv
+    max_quantile_spread = resolved["max_quantile_spread"]
+    min_median_return = resolved["min_median_return"]
+    slippage_pct = resolved["slippage_pct"]
+    max_iv = resolved["max_iv"]
     min_open_interest = req.min_open_interest
     min_dte = req.min_dte or 7
     max_dte = req.max_dte or 60
 
     # Apply lookback_days filter on pre-computed predictions
-    if req.lookback_days is not None and req.lookback_days > 0 and predictions:
+    _lookback_days = resolved["lookback_days"]
+    if _lookback_days is not None and _lookback_days > 0 and predictions:
         max_ts = max(p["row"]["timestamp"] for p in predictions)
         max_dt = datetime.datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S")
-        cutoff_dt = max_dt - datetime.timedelta(days=req.lookback_days)
+        cutoff_dt = max_dt - datetime.timedelta(days=_lookback_days)
         cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
         predictions = [p for p in predictions if p["row"]["timestamp"] >= cutoff_str]
 
@@ -2416,7 +2475,7 @@ def api_backtest(req: BacktestRequestSchema):
     print(f"Executing strategy: {strategy_type}")
     print(f"Simulation date range: {start_date} to {end_date}")
 
-    current_equity = req.initial_capital or 100000.0
+    current_equity = resolved["initial_capital"] or 100000.0
     available_capital = current_equity
     active_trades = []
     transactions = []
@@ -2546,17 +2605,19 @@ def api_backtest(req: BacktestRequestSchema):
                 # (not strategy-tuning knobs).
                 if not synth_mode and row.get("ticker") not in TIER_PROFITABLE_TICKERS:
                     continue
-                iv_val = float(row.get("implied_vol", 0))
+                iv_val = float(row.get("implied_vol") or 0)
                 if not (15 <= iv_val <= 150):
                     continue
-                voi = float(row.get("vol_oi_ratio", 0))
+                voi = float(row.get("vol_oi_ratio") or 0)
                 voi_floor = req.synth_vol_oi_floor if synth_mode else (req.real_vol_oi_floor if req.real_vol_oi_floor is not None else 2.0)
+                if voi_floor is None: voi_floor = 0.0
                 if voi < voi_floor:
                     continue
-                dte_val = int(row.get("dte", 0))
+                dte_val = int(row.get("dte") or 0)
                 if not (14 <= dte_val <= 60):
                     continue
                 iqr_cap = req.synth_max_quantile_spread if synth_mode else max_quantile_spread
+                if iqr_cap is None: iqr_cap = 99.0
                 if p_success < cur_prob_threshold or iqr > iqr_cap or p50_pred < min_median_return:
                     continue
                 is_eligible = True
@@ -2571,14 +2632,15 @@ def api_backtest(req: BacktestRequestSchema):
                 # not the expected-return quantile spread.
                 if not synth_mode and row.get("ticker") not in TIER_PROFITABLE_TICKERS:
                     continue
-                iv_val = float(row.get("implied_vol", 0))
+                iv_val = float(row.get("implied_vol") or 0)
                 if not (15 <= iv_val <= 150):
                     continue
-                voi = float(row.get("vol_oi_ratio", 0))
+                voi = float(row.get("vol_oi_ratio") or 0)
                 voi_floor = req.synth_vol_oi_floor if synth_mode else (req.real_vol_oi_floor if req.real_vol_oi_floor is not None else 1.0)
+                if voi_floor is None: voi_floor = 0.0
                 if voi < voi_floor:
                     continue
-                dte_val = int(row.get("dte", 0))
+                dte_val = int(row.get("dte") or 0)
                 if not (14 <= dte_val <= 60):
                     continue
                 trend = str(row.get("trend_alignment", ""))
@@ -2603,15 +2665,17 @@ def api_backtest(req: BacktestRequestSchema):
                 # not a tunable threshold.
                 if not synth_mode and row.get("ticker") not in TIER_PROFITABLE_TICKERS:
                     continue
-                iv_val = float(row.get("implied_vol", 30))
-                dte_val = int(row.get("dte", 0))
+                iv_val = float(row.get("implied_vol") or 30)
+                dte_val = int(row.get("dte") or 0)
                 if not (14 <= dte_val <= 60):
                     continue
-                voi = float(row.get("vol_oi_ratio", 0))
+                voi = float(row.get("vol_oi_ratio") or 0)
                 voi_floor = req.synth_vol_oi_floor if synth_mode else (req.real_vol_oi_floor if req.real_vol_oi_floor is not None else 1.0)
+                if voi_floor is None: voi_floor = 0.0
                 if voi < voi_floor:
                     continue
                 iqr_cap = req.synth_max_quantile_spread if synth_mode else max_quantile_spread
+                if iqr_cap is None: iqr_cap = 99.0
                 # High-IV regime: require both the IQR cap and a slightly relaxed
                 # p_success threshold (the data shows fat-tailed IQRs in high IV
                 # are a property of the regime, not model miscalibration).
@@ -2827,7 +2891,7 @@ def api_backtest(req: BacktestRequestSchema):
 
     # Max drawdown
     max_drawdown = 0.0
-    peak = req.initial_capital or 100000.0
+    peak = resolved["initial_capital"] or 100000.0
     for eq in equity_values:
         if eq > peak:
             peak = eq
@@ -2835,7 +2899,7 @@ def api_backtest(req: BacktestRequestSchema):
         if dd > max_drawdown:
             max_drawdown = dd
 
-    initial_cap = req.initial_capital or 100000.0
+    initial_cap = resolved["initial_capital"] or 100000.0
     cum_pnl_pct = ((current_equity - initial_cap) / initial_cap) * 100.0
     cumulative_pnl_usd = current_equity - initial_cap
     
@@ -2894,6 +2958,7 @@ BOOT_CACHE_PATH = os.path.join(CACHE_DIR, "boot_backtest_cache.pkl")
 
 SWEEP_OPTIMAL_PATHS = [
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts", "sweep_optimal.json"),
+    os.path.join(CACHE_DIR, "sweep_optimal_v2.json"),  # CHANGELOG: 2026-07-28 v2 sweep output
     os.path.join(CACHE_DIR, "sweep_optimal.json"),
 ]
 
@@ -3029,116 +3094,6 @@ def api_get_default_backtest_cache(use_synthetic: bool = True):
         except Exception as ex:
             logger.warning(f"Failed to load BOOT_CACHE_PATH: {ex}")
 
-    # Determine top strategy and params from sweep_optimal.json if available.
-    # # defaults mirror BacktestRequestSchema — single source of truth.
-    # PHASE A: Default to "whale_quality" (new strategy). "quantile_spread"
-    # was not a valid strategy name and would fall through to no-match,
-    # making the boot cache render an empty backtest result.
-    strat_type = "whale_quality"
-    # Read defaults from BacktestRequestSchema — single source of truth.
-    # (Construct a default instance and dump its fields.)
-    _default_req = BacktestRequestSchema()
-    opt_params = {
-        "prob_threshold": _default_req.prob_threshold,
-        "kelly_multiplier": _default_req.kelly_multiplier,
-        "kelly_cap": _default_req.kelly_cap,
-        "stop_lambda": _default_req.stop_lambda,
-        "hard_stop_loss": _default_req.hard_stop_loss,
-        "profit_threshold": _default_req.profit_threshold,
-        "calibration_target_pct": _default_req.calibration_target_pct,
-        "max_quantile_spread": _default_req.max_quantile_spread,
-        "min_median_return": _default_req.min_median_return,
-        "max_concurrent_trades": _default_req.max_concurrent_trades,
-        "max_iv": _default_req.max_iv,
-        "slippage_pct": _default_req.slippage_pct,
-        "min_kelly_fraction": _default_req.min_kelly_fraction,
-    }
-    eval_type = "in-sample"
-
-    if sweep_data and isinstance(sweep_data, dict):
-        best_strat = None
-        best_sharpe = -999.0
-        for st_name, st_info in sweep_data.items():
-            if isinstance(st_info, dict) and "metrics" in st_info and "params" in st_info:
-                sharpe = float(st_info["metrics"].get("sharpe", -999.0))
-                if sharpe > best_sharpe:
-                    best_sharpe = sharpe
-                    best_strat = (st_name, st_info)
-        
-        if best_strat:
-            st_name, st_info = best_strat
-            strat_type = st_name
-            p = st_info.get("params", {})
-            eval_type = st_info.get("evaluation", "unknown")
-            opt_params = {
-                "prob_threshold": p.get("prob_threshold", 0.35),
-                "kelly_multiplier": p.get("kelly_multiplier", 0.80),
-                "kelly_cap": p.get("kelly_cap", 0.30),
-                "stop_lambda": p.get("stop_lambda", 1.5),
-                "hard_stop_loss": p.get("hard_stop_loss", 0.06),
-                "profit_threshold": p.get("profit_threshold", 0.08),
-                "calibration_target_pct": p.get("calibration_target_pct", 0.025),
-                "max_quantile_spread": p.get("max_quantile_spread", 0.35),
-                "min_median_return": p.get("min_median_return", 0.015),
-                "max_concurrent_trades": int(p.get("max_concurrent_trades", 10)),
-                "max_iv": p.get("max_iv", 120.0),
-                "slippage_pct": p.get("slippage_pct", 0.01),
-                "min_kelly_fraction": p.get("min_kelly_fraction", 0.005)
-            }
-
-    default_req = BacktestRequestSchema(
-        mode="walkforward",
-        strategy_type=strat_type,
-        prob_threshold=opt_params["prob_threshold"],
-        kelly_multiplier=opt_params["kelly_multiplier"],
-        kelly_cap=opt_params["kelly_cap"],
-        stop_lambda=opt_params.get("stop_lambda", 1.5),
-        hard_stop_loss=opt_params["hard_stop_loss"],
-        profit_threshold=opt_params["profit_threshold"],
-        calibration_target_pct=opt_params["calibration_target_pct"],
-        max_quantile_spread=opt_params["max_quantile_spread"],
-        min_median_return=opt_params["min_median_return"],
-        max_concurrent_trades=opt_params["max_concurrent_trades"],
-        walkforward_train_window=500,
-        walkforward_test_increment=250,  # PHASE A: matches schema default
-        slippage_pct=opt_params["slippage_pct"],
-        min_kelly_fraction=opt_params["min_kelly_fraction"],
-        initial_capital=100000.0,
-        max_iv=opt_params["max_iv"],
-        data_start_idx=0,  # PHASE A: matches schema default (0 = start)
-        use_synthetic=use_synthetic,  # PHASE A: bug fix — was always False, ignoring the function arg.
-    )
-    try:
-        res = api_backtest(default_req)
-    except HTTPException as e:
-        if e.status_code == 422:
-            return {
-                "error": "insufficient_data",
-                "message": f"Not enough labeled trades to run backtest. Please complete the labeling process first. ({e.detail})",
-                "summary": {
-                    "cumulative_pnl_pct": 0,
-                    "cumulative_pnl_usd": 0,
-                    "trades_triggered": 0,
-                    "trades_total_available": 0
-                }
-            }
-        raise
-
-    res_copy = dict(res)
-    res_copy["cache_metadata"] = {
-        "cached_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "strategy_name": f"{strat_type} ({eval_type.upper()} Optimal Default)",
-        "evaluation": eval_type,
-        "optimal_params": opt_params,
-        "model_version": cache_version,
-        "is_stale": False
-    }
-
-    try:
-        joblib.dump({"model_version": cache_version, "data": res_copy}, BOOT_CACHE_PATH)
-    except Exception as ex:
-        logger.warning(f"Failed to save BOOT_CACHE_PATH: {ex}")
-
-    return res_copy
+    raise HTTPException(status_code=404, detail="No valid boot cache found.")
 
 

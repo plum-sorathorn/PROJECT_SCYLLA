@@ -23,19 +23,24 @@
   /* Accent Colors */
   --color-accent:            #005566;       /* Deep teal active/highlight accent */
   --color-accent-hover:      #004452;       /* Darker teal for button/CTA hover */
-  
+
   /* Status Colors */
   --color-profit:            #2d7a4a;       /* Muted emerald green */
   --bg-profit:               #e8f5e9;       /* Pale mint background */
-  
+
   --color-loss:              #8b3a3a;       /* Muted ruby red */
   --bg-loss:                 #ffebee;       /* Pale rose background */
-  
+
   --color-warning:           #ffb700;       /* Muted amber warning */
   --bg-warning:              #fff3cd;       /* Pale amber background */
-  
+
   --color-alert:             #c62828;       /* Deep red system critical alert */
   --bg-alert:                #ffebee;       /* Pale red alert background */
+
+  /* Semantic aliases — used by inline styles in app.js / index.html */
+  --accent:                  var(--color-accent);
+  --call:                    var(--color-profit);
+  --put:                     var(--color-loss);
 
   /* Borders & Dividers */
   --border-default:          0.5px solid #e0e0e0; /* Default hairline border */

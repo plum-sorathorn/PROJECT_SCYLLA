@@ -1,102 +1,63 @@
 {
-  "_comment": "Consolidated default parameters for all strategies. Frontend and backend reference this file to stay in sync.",
-  "_updated": "2026-07-25",
-  "_notes": "Parameters calibrated via walk-forward parameter sweep on 10,000 labeled trades. Hard requirements enforced as floors.",
-  
-  "hard_requirements": {
-    "min_stop_loss": 0.25,
-    "min_open_interest": 100,
-    "max_iv": 100.0,
-    "min_dte": 7,
-    "max_dte": 60,
-    "max_kelly_cap": 0.20,
-    "max_risk_pct_per_trade": 0.02,
-    "min_kelly_fraction": 0.01,
-    "min_prob_threshold": 0.40,
-    "max_concurrent_trades": 8
-  },
+  "_comment": "Consolidated default parameters for all strategies. Single source of truth — frontend, backend, and HTML defaults must all reference this file (or its API). Update one place, propagate everywhere.",
+  "_updated": "2026-07-28",
+  "_sweep_source": "scripts/sweep_strategies_v2.py",
+  "_sweep_dataset": "real (is_synthetic=0), walkforward 500/100, ~68k labeled trades",
+  "_notes": "Values calibrated by the v2 sweep against real data. Realistic options-trading ranges: profit_threshold 15-50%, hard_stop_loss 15-40%, kelly_cap 5-20%. Values outside those ranges are bugs.",
 
   "common": {
-    "mode": "walkforward",
     "initial_capital": 100000.0,
     "walkforward_train_window": 500,
     "walkforward_test_increment": 100,
+    "min_kelly_fraction": 0.01,
     "slippage_pct": 0.01,
     "lookback_days": null,
+    "min_open_interest": 100,
     "scan_time": "10:00:00",
-    "stop_lambda": 1.5
+    "max_risk_pct_per_trade": 0.02
   },
-  
+
   "strategies": {
-    "quantile_confidence": {
-      "strategy_type": "quantile_confidence",
-      "prob_threshold": 0.40,
-      "kelly_multiplier": 0.75,
-      "kelly_cap": 0.12,
-      "hard_stop_loss": 0.25,
-      "profit_threshold": 0.10,
-      "max_quantile_spread": 0.20,
-      "min_median_return": 0.001,
-      "real_vol_oi_floor": 2.0,
-      "synth_vol_oi_floor": 0.5,
-      "synth_max_quantile_spread": 3.0,
-      "max_concurrent_trades": 8,
-      "metrics": {
-        "sharpe": 1.85,
-        "sortino": 1.13,
-        "win_rate": 58.18,
-        "trades": 110,
-        "return_pct": 12.74,
-        "max_drawdown": 2.00,
-        "profit_factor": 2.40
-      }
+    "whale_quality": {
+      "strategy_type": "whale_quality",
+      "prob_threshold": 0.372,
+      "kelly_multiplier": 0.873,
+      "kelly_cap": 0.066,
+      "hard_stop_loss": 0.173,
+      "stop_lambda": 1.5,
+      "max_quantile_spread": 0.306,
+      "min_median_return": 0.01,
+      "max_iv": 109.109,
+      "max_concurrent_trades": 6,
+      "profit_threshold": 0.456
     },
 
-    "trend_breakout": {
-      "strategy_type": "trend_breakout",
-      "prob_threshold": 0.38,
-      "kelly_multiplier": 0.90,
-      "kelly_cap": 0.12,
-      "hard_stop_loss": 0.25,
-      "profit_threshold": 0.12,
-      "min_median_return": 0.02,
-      "max_quantile_spread": 0.35,
-      "real_vol_oi_floor": 1.0,
-      "synth_vol_oi_floor": 0.3,
-      "synth_max_quantile_spread": 3.0,
-      "max_concurrent_trades": 8,
-      "metrics": {
-        "sharpe": 1.53,
-        "sortino": 0.96,
-        "win_rate": 58.65,
-        "trades": 104,
-        "return_pct": 11.86,
-        "max_drawdown": 2.43,
-        "profit_factor": 2.16
-      }
+    "contrarian_trend": {
+      "strategy_type": "contrarian_trend",
+      "prob_threshold": 0.426,
+      "kelly_multiplier": 0.718,
+      "kelly_cap": 0.11,
+      "hard_stop_loss": 0.177,
+      "stop_lambda": 1.5,
+      "max_quantile_spread": 0.0,
+      "min_median_return": 0.0,
+      "max_iv": 58.907,
+      "max_concurrent_trades": 9,
+      "profit_threshold": 0.418
     },
 
-    "iv_regime_adaptive": {
-      "strategy_type": "iv_regime_adaptive",
-      "prob_threshold": 0.38,
-      "kelly_multiplier": 0.75,
-      "kelly_cap": 0.12,
-      "hard_stop_loss": 0.25,
-      "profit_threshold": 0.11,
-      "max_quantile_spread": 0.35,
-      "real_vol_oi_floor": 1.0,
-      "synth_vol_oi_floor": 0.3,
-      "synth_max_quantile_spread": 3.0,
-      "max_concurrent_trades": 8,
-      "metrics": {
-        "sharpe": 1.55,
-        "sortino": 0.76,
-        "win_rate": 59.05,
-        "trades": 105,
-        "return_pct": 9.46,
-        "max_drawdown": 2.01,
-        "profit_factor": 1.99
-      }
+    "vol_regime": {
+      "strategy_type": "vol_regime",
+      "prob_threshold": 0.43,
+      "kelly_multiplier": 0.968,
+      "kelly_cap": 0.163,
+      "hard_stop_loss": 0.204,
+      "stop_lambda": 1.5,
+      "max_quantile_spread": 0.337,
+      "min_median_return": 0.0,
+      "max_iv": 70.685,
+      "max_concurrent_trades": 10,
+      "profit_threshold": 0.442
     }
   }
 }

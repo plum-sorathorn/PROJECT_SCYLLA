@@ -11,6 +11,8 @@ import numpy as np
 import yfinance as yf
 import logging
 
+from ._yf_safe import safe_call, _staggered_submit
+
 logger = logging.getLogger("scylla.unusual_options")
 
 router = APIRouter()
@@ -28,14 +30,14 @@ SCAN_TICKERS = [
 def fetch_option_chain(ticker: str) -> pd.DataFrame:
     """Fetch full option chain for a ticker via yfinance."""
     try:
-        tk = yf.Ticker(ticker)
-        expirations = tk.options
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        expirations = safe_call(lambda t: list(t.options) if t.options else [], tk)
         if not expirations:
             return pd.DataFrame()
 
-        spot = tk.fast_info.get("lastPrice", None)
+        spot = safe_call(lambda t: t.fast_info.get("lastPrice"), tk)
         if spot is None or spot == 0:
-            hist = tk.history(period="1d")
+            hist = safe_call(lambda t: t.history(period="1d"), tk)
             spot = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
 
         # Target expirations between 0 and 90 Days to Expiration (DTE), capping at a maximum of 6
@@ -64,7 +66,7 @@ def fetch_option_chain(ticker: str) -> pd.DataFrame:
         frames = []
         for exp in selected_exps:
             try:
-                chain = tk.option_chain(exp)
+                chain = safe_call(lambda t, e: t.option_chain(e), tk, exp)
                 calls = chain.calls.copy()
                 puts = chain.puts.copy()
                 calls["optionType"] = "Call"
@@ -90,7 +92,8 @@ def fetch_option_chain(ticker: str) -> pd.DataFrame:
 def compute_sma_flags(ticker: str) -> dict:
     """Compute 50d and 200d SMA alignment flags."""
     try:
-        hist = yf.Ticker(ticker).history(period="1y")
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        hist = safe_call(lambda t: t.history(period="1y"), tk)
         if hist.empty or len(hist) < 50:
             return {"above50dSMA": None, "above200dSMA": None}
         close = hist["Close"]
@@ -111,14 +114,14 @@ from .utils import _sanitize_float_values
 def compute_expected_move(ticker: str) -> "float | None":
     """ATM straddle price = call_price + put_price for front-month near ATM."""
     try:
-        tk = yf.Ticker(ticker)
-        spot = tk.fast_info.get("lastPrice", 0.0)
-        expirations = tk.options
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        spot = safe_call(lambda t: t.fast_info.get("lastPrice", 0.0), tk)
+        expirations = safe_call(lambda t: list(t.options) if t.options else [], tk)
         if not expirations or spot == 0:
             return 0.0
 
         exp = expirations[0]
-        chain = tk.option_chain(exp)
+        chain = safe_call(lambda t, e: t.option_chain(e), tk, exp)
         calls = chain.calls
         puts = chain.puts
 
@@ -157,6 +160,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _SCANNER_CACHE = {}
 _CACHE_TTL_SECONDS = 180  # 3 minutes cache TTL
+
+_CHAIN_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_CHAIN_TTL_SECONDS = 60
 
 
 def _process_single_ticker(ticker: str, min_vol_oi: float) -> list[dict]:
@@ -297,19 +303,36 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
     if not ticker_list:
         return []
 
+    # Two-tier cache: serve fresh per-ticker rows from _CHAIN_CACHE, fetch only the
+    # uncached remainder from yfinance. Lowered to 6 workers + staggered submit to
+    # avoid triggering Yahoo's burst rate-limiter (single 'exchangeTimezoneName'
+    # KeyError storms were the dominant failure mode at 20 workers).
+    uncached = []
     all_rows = []
-    # Fetch option chains in parallel across max 20 worker threads
-    workers = min(20, len(ticker_list))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_process_single_ticker, ticker, min_vol_oi): ticker for ticker in ticker_list}
-        for future in as_completed(futures):
-            try:
-                res = future.result()
-                if res:
-                    all_rows.extend(res)
-            except Exception as e:
+    for t in ticker_list:
+        entry = _CHAIN_CACHE.get(t)
+        if entry is not None and (now - entry[0]) < _CHAIN_TTL_SECONDS:
+            all_rows.extend(entry[1])
+        else:
+            uncached.append(t)
+
+    if uncached:
+        workers = min(6, len(uncached))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {}
+            for ticker in uncached:
+                fut = _staggered_submit(executor, _process_single_ticker, ticker, min_vol_oi)
+                futures[fut] = ticker
+            for future in as_completed(futures):
                 t_name = futures[future]
-                logger.warning(f"Failed parallel scan for ticker {t_name}: {e}")
+                try:
+                    res = future.result()
+                    if res:
+                        all_rows.extend(res)
+                    _CHAIN_CACHE[t_name] = (time.time(), res if isinstance(res, list) else [])
+                except Exception as e:
+                    logger.warning(f"Failed parallel scan for ticker {t_name}: {e}")
+                    _CHAIN_CACHE.pop(t_name, None)
 
     all_rows.sort(key=lambda x: x["volOiRatio"], reverse=True)
     results = all_rows[:limit]

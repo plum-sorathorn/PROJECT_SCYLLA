@@ -402,9 +402,9 @@
         <canvas id="chart-pcr"></canvas>
       </div>
       <div class="chart-legend">
-        <span class="legend-item" style="--c:#E2E2E2">SPY</span>
-        <span class="legend-item" style="--c:#D4AF37">QQQ</span>
-        <span class="legend-item" style="--c:#BF5A5A">IWM</span>
+        <span class="legend-item" style="--c:#005566">SPY</span>
+        <span class="legend-item" style="--c:#2d7a4a">QQQ</span>
+        <span class="legend-item" style="--c:#8b3a3a">IWM</span>
       </div>
     </section>
   
@@ -427,8 +427,8 @@
         <canvas id="chart-volcon"></canvas>
       </div>
       <div class="chart-legend">
-        <span class="legend-item" style="--c:#E2E2E2">CALLS</span>
-        <span class="legend-item" style="--c:#BF5A5A">PUTS</span>
+        <span class="legend-item" style="--c:#2d7a4a">CALLS</span>
+        <span class="legend-item" style="--c:#8b3a3a">PUTS</span>
       </div>
     </section>
   
@@ -542,16 +542,23 @@
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">STRATEGY TYPE</label>
               <select id="bt-strategy-type" class="filter-select">
-                <option value="vol_regime" selected>Vol Regime (Best PnL: +2,042%)</option>
-                <option value="whale_quality">Whale Quality (+1,612%)</option>
-                <option value="contrarian_trend">Contrarian Trend (+1,402%)</option>
+                <option value="vol_regime" selected>Vol Regime (OOS: +17.1% / 5.8yr, Sharpe 1.16, 213 trades)</option>
+                <option value="contrarian_trend">Contrarian Trend (OOS: +6.9% / 5.8yr, Sharpe 1.35, 46 trades)</option>
+                <option value="whale_quality">Whale Quality (OOS: +1.6% / 5.8yr, Sharpe 0.48, 40 trades)</option>
               </select>
             </div>
 
+            <!-- BACKTEST FORM DEFAULTS — these value="..." attributes are the LAST-RESORT
+                 fallback only (used when JS fails to load OR the API is unreachable).
+                 The single source of truth is backend/config/strategy_defaults.json,
+                 served via /api/ml/strategy-defaults and consumed by app.js loadOptimalParams().
+                 Values below mirror the vol_regime block (default-selected strategy) from
+                 the v2 sweep (scripts/sweep_strategies_v2.py, 2026-07-28).
+                 If you change values here, also update the JSON file so they stay in sync. -->
             <!-- Max Concurrent Trades (highest_prob_scan only) -->
             <div class="form-group" id="bt-max-concurrent-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MAX CONCURRENT TRADES</label>
-              <input type="number" id="bt-max-concurrent" value="12" min="1" max="20" step="1" class="filter-input" />
+              <input type="number" id="bt-max-concurrent" value="10" min="1" max="20" step="1" class="filter-input" />
             </div>
 
             <!-- Scan Time (highest_prob_scan only) -->
@@ -563,7 +570,7 @@
             <!-- Min Prob Threshold -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN SUCCESS PROBABILITY (%)</label>
-              <input type="number" id="bt-prob-threshold" value="40" min="2" max="98" step="1" class="filter-input" />
+              <input type="number" id="bt-prob-threshold" value="43" min="2" max="98" step="1" class="filter-input" />
             </div>
 
             <!-- Min Kelly Fraction -->
@@ -575,31 +582,31 @@
             <!-- Hard Stop Loss -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">HARD STOP LOSS (%)</label>
-              <input type="number" id="bt-hard-stop-loss" value="4" min="1" max="100" step="0.5" class="filter-input" placeholder="4% default" />
+              <input type="number" id="bt-hard-stop-loss" value="20" min="1" max="100" step="0.5" class="filter-input" placeholder="20% default" />
             </div>
 
             <!-- Kelly Allocation Cap -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">KELLY ALLOCATION CAP (%)</label>
-              <input type="number" id="bt-kelly-cap" value="5" min="1" max="20" step="1" class="filter-input" placeholder="5% default" />
+              <input type="number" id="bt-kelly-cap" value="16" min="1" max="20" step="1" class="filter-input" placeholder="16% default" />
             </div>
 
             <!-- Profit Threshold -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">PROFIT THRESHOLD (%)</label>
-              <input type="number" id="bt-profit-threshold" value="50" min="1" max="500" step="0.5" class="filter-input" placeholder="50%" />
+              <input type="number" id="bt-profit-threshold" value="44" min="1" max="500" step="0.5" class="filter-input" placeholder="44% default" />
             </div>
 
             <!-- Max Quantile Spread -->
             <div class="form-group strategy-field" id="bt-max-quantile-spread-group" data-strategies="whale_quality" style="display: flex; flex-direction: column;">
               <label class="field-label">MAX QUANTILE SPREAD (IQR)</label>
-              <input type="number" id="bt-max-quantile-spread" value="0.35" min="0.01" max="10.0" step="0.01" class="filter-input" placeholder="0.35" />
+              <input type="number" id="bt-max-quantile-spread" value="0.34" min="0.01" max="10.0" step="0.01" class="filter-input" placeholder="0.34" />
             </div>
 
             <!-- Min Median Return -->
             <div class="form-group strategy-field" id="bt-min-median-return-group" data-strategies="contrarian_trend" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN MEDIAN RETURN (%)</label>
-              <input type="number" id="bt-min-median-return" value="1.5" min="0.1" max="20" step="0.1" class="filter-input" placeholder="1.5%" />
+              <input type="number" id="bt-min-median-return" value="0.0" min="0.0" max="20" step="0.1" class="filter-input" placeholder="0.0%" />
             </div>
 
             <!-- Slippage -->
@@ -644,11 +651,11 @@
             <div id="kelly-config-group">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <label class="field-label" id="kelly-label-text">KELLY MULTIPLIER</label>
-                <span id="kelly-val-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">0.80</span>
+                <span id="kelly-val-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">0.97</span>
               </div>
               <!-- Single Input -->
               <div id="kelly-single-input">
-                <input type="range" id="bt-kelly-multiplier" min="0.05" max="1.0" value="0.80" step="0.05" class="filter-slider" />
+                <input type="range" id="bt-kelly-multiplier" min="0.05" max="1.0" value="0.97" step="0.05" class="filter-slider" />
               </div>
               <!-- Sweep Inputs -->
               <div id="kelly-sweep-inputs" style="display: none; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
@@ -703,7 +710,7 @@
             </div>
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">TEST INCREMENT (TRADES)</label>
-              <input type="number" id="bt-test-increment" value="250" min="1" step="1" class="filter-input" />
+              <input type="number" id="bt-test-increment" value="100" min="1" step="1" class="filter-input" />
             </div>
           </div>
 
@@ -922,7 +929,7 @@
             <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">EVALUATION HORIZON (DAYS)</label>
             <select id="cfg-horizon" class="filter-select" style="width: 100%;">
               <option value="5">5</option>
-              <option value="10">10</option>
+              <option value="10" selected>10</option>
               <option value="20">20</option>
               <option value="30">30</option>
               <option value="45">45</option>
@@ -937,6 +944,9 @@
               <option value="0.03">3%</option>
               <option value="0.05">5%</option>
               <option value="0.10">10%</option>
+              <option value="0.25">25%</option>
+              <option value="0.50" selected>50%</option>
+              <option value="1.00">100%</option>
             </select>
           </div>
         </div>

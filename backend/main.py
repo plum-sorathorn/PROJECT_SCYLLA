@@ -6,7 +6,9 @@ Provides free market data via OpenBB ODP (yfinance + CBOE providers).
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.params import Param
 import asyncio
+import inspect
 import logging
 
 from routers import unusual_options, put_call_ratio, volume_concentration, iv_skew, technicals, ml_model
@@ -44,22 +46,36 @@ app.include_router(technicals.router, prefix="/api", tags=["Technicals API"])
 app.include_router(ml_model.router, prefix="/api", tags=["ML Model API"])
 
 
+def _call_with_resolved_defaults(func, **overrides):
+    """Call a router handler as a plain function, resolving any FastAPI Param
+    (Query/Path/Body/etc.) defaults to their underlying value. The handler's
+    declared signature is the single source of truth for defaults; explicit
+    kwargs in `overrides` take precedence.
+    """
+    sig = inspect.signature(func)
+    kwargs = {}
+    for name, param in sig.parameters.items():
+        if name in overrides:
+            kwargs[name] = overrides[name]
+        else:
+            default = param.default
+            if isinstance(default, Param):
+                kwargs[name] = default.default
+            else:
+                kwargs[name] = default
+    return func(**kwargs)
+
+
 async def tactical_bundle(
     min_vol_oi: float = 2.0,
     volcon_ticker: str = "SPY",
     iv_ticker: str = "SPY",
 ):
-    def _endpoint(router, path="/"):
-        for route in router.routes:
-            if hasattr(route, "path") and route.path == path:
-                return route.endpoint
-        raise RuntimeError(f"Endpoint {path} not found on router")
-
     scanner, pcr, volcon, iv = await asyncio.gather(
-        asyncio.to_thread(_endpoint(unusual_options.router), min_vol_oi=min_vol_oi),
-        asyncio.to_thread(_endpoint(put_call_ratio.router)),
-        asyncio.to_thread(_endpoint(volume_concentration.router), ticker=volcon_ticker),
-        asyncio.to_thread(_endpoint(iv_skew.router), ticker=iv_ticker),
+        asyncio.to_thread(_call_with_resolved_defaults, unusual_options.get_scanner, min_vol_oi=min_vol_oi),
+        asyncio.to_thread(_call_with_resolved_defaults, put_call_ratio.get_put_call_ratio),
+        asyncio.to_thread(_call_with_resolved_defaults, volume_concentration.get_volume_concentration, ticker=volcon_ticker),
+        asyncio.to_thread(_call_with_resolved_defaults, iv_skew.get_iv_skew, ticker=iv_ticker),
     )
     return {
         "scanner": scanner,

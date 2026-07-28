@@ -522,6 +522,8 @@ function renderVolConChart() {
 
   if (state.charts.volcon) state.charts.volcon.destroy();
 
+
+
   state.charts.volcon = new Chart(ctx, {
     type: 'bar',
     data: {
@@ -530,18 +532,28 @@ function renderVolConChart() {
         {
           label: 'Call Volume',
           data: callVols,
-          backgroundColor: '#2d7a4a',
-          borderColor: '#1f5a36',
-          borderWidth: 1,
+          backgroundColor: 'rgba(0, 85, 102, 0.15)',
+          hoverBackgroundColor: 'rgba(0, 85, 102, 0.25)',
+          borderColor: 'rgba(0, 85, 102, 1)',
+          borderWidth: 1.5,
+          borderRadius: { topLeft: 4, topRight: 4, bottomLeft: 0, bottomRight: 0 },
+          borderSkipped: false,
           stack: 'vol',
+          barPercentage: 0.78,
+          categoryPercentage: 0.82,
         },
         {
           label: 'Put Volume',
           data: putVols,
-          backgroundColor: '#8b3a3a',
-          borderColor: '#5e2828',
-          borderWidth: 1,
+          backgroundColor: 'rgba(139, 58, 58, 0.15)',
+          hoverBackgroundColor: 'rgba(139, 58, 58, 0.25)',
+          borderColor: 'rgba(139, 58, 58, 1)',
+          borderWidth: 1.5,
+          borderRadius: { topLeft: 0, topRight: 0, bottomLeft: 4, bottomRight: 4 },
+          borderSkipped: false,
           stack: 'vol',
+          barPercentage: 0.78,
+          categoryPercentage: 0.82,
         },
       ],
     },
@@ -981,10 +993,10 @@ async function runLabeling(forceReLabel = false) {
     const forceParam = forceReLabel ? '&force=true' : '';
     const r = await fetch(`${API_BASE}/api/ml/label?horizon_days=${horizon}&profit_threshold=${threshold}${forceParam}`, { method: 'POST' });
     const res = await r.json();
-    alert(`Labeling run finished. Labeled ${res.labeled_count} trades.`);
+    showToast(`Labeling run finished. Labeled ${res.labeled_count} trades.`, 'success');
     await refreshML();
   } catch (e) {
-    alert(`Labeling worker failed: ${e.message}`);
+    showToast(`Labeling worker failed: ${e.message}`, 'error');
   } finally {
     btn.textContent = prevText;
     btn.disabled = false;
@@ -1004,21 +1016,21 @@ async function runRetraining() {
     
     if (res.status === 'success') {
       const m = res.metrics;
-      $('sum-train-acc').textContent = fmtPct(m.train_accuracy);
-      $('sum-test-acc').textContent = fmtPct(m.test_accuracy);
+      if ($('sum-train-acc')) $('sum-train-acc').textContent = fmtPct(m.train_accuracy);
+      if ($('sum-test-acc')) $('sum-test-acc').textContent = fmtPct(m.test_accuracy);
       
       if ($('sum-cv-roc-auc')) $('sum-cv-roc-auc').textContent = fmtPct(m.cv_roc_auc_mean);
       if ($('sum-test-f1')) $('sum-test-f1').textContent = fmtPct(m.test_f1);
       
       // Render Feature Importances
       renderFeatureImportances(res.feature_importances);
-      alert(`Model retraining successful! Trained on ${m.samples_count} labeled trade instances.`);
+      showToast(`Model retraining successful! Trained on ${m.samples_count} labeled trade instances.`, 'success');
       await refreshML();
     } else {
-      alert(`Retraining returned abnormal status: ${res.message}`);
+      showToast(`Retraining returned abnormal status: ${res.message}`, 'error');
     }
   } catch (e) {
-    alert(`Retraining pipeline failed. Make sure scikit-learn is installed in your python backend. Error: ${e.message}`);
+    showToast(`Retraining pipeline failed. Make sure scikit-learn is installed in your python backend. Error: ${e.message}`, 'error');
   } finally {
     btn.textContent = prevText;
     btn.disabled = false;
@@ -1329,7 +1341,7 @@ async function fetchOpenTrades() {
       // Color the probability
       const probEl = $('top-trade-prob');
       if (topTrade.p_success >= 0.70) {
-        probEl.style.color = '#8FA382';
+        probEl.style.color = 'var(--call)';
       } else if (topTrade.p_success <= 0.40) {
         probEl.style.color = 'var(--put)';
       } else {
@@ -1351,9 +1363,9 @@ async function fetchOpenTrades() {
 }
 
 const STRATEGY_DEFAULT_PARAMS = {
-  whale_quality:     { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0.25, median_ret: 0, max_iv: 150, profit: 5 },
-  contrarian_trend:  { prob: 35, kelly: 0.90, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 5 },
-  vol_regime:        { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 5 },
+  whale_quality:     { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0.25, median_ret: 0, max_iv: 150, profit: 50 },
+  contrarian_trend:  { prob: 35, kelly: 0.90, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 50 },
+  vol_regime:        { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 50 },
 };
 
 function getStrategyParams(strategyType) {
@@ -1364,7 +1376,7 @@ function getStrategyParams(strategyType) {
     const s = state.strategyDefaults.strategies[strategyType];
     return mapApiOptimalToFormInputs(s);
   }
-  return FALLBACK_OPT_PARAMS[strategyType] || null;
+  return null;
 }
 
 function isEligibleForStrategy(trade, strategyType) {
@@ -1484,7 +1496,7 @@ function renderOpenTradesTable() {
 
       const probEl = $('top-trade-prob');
       if (probEl) {
-        if (topTrade.p_success >= 0.70) probEl.style.color = '#8FA382';
+        if (topTrade.p_success >= 0.70) probEl.style.color = 'var(--call)';
         else if (topTrade.p_success <= 0.40) probEl.style.color = 'var(--put)';
         else probEl.style.color = 'var(--accent)';
       }
@@ -1664,12 +1676,6 @@ function setupEventListeners() {
 // and absolute numbers for things like max_concurrent_trades. The HTML inputs
 // expect prob/kelly_cap/hard_stop/median_ret in percent (×100), kelly/stop_lambda
 // as fractions, max_spread/max_iv as absolute, profit_threshold in percent.
-const FALLBACK_OPT_PARAMS = {
-  'whale_quality':    { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, concurrent: 12, profit: 5,  median_ret: 0, max_spread: 0.25, max_iv: 150 },
-  'contrarian_trend': { prob: 35, kelly: 0.90, kelly_cap: 5,  stop: 1.5, hard_stop: 4, concurrent: 12, profit: 5,  median_ret: 0, max_spread: 0,    max_iv: 150 },
-  'vol_regime':       { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, concurrent: 12, profit: 5,  median_ret: 0, max_spread: 0,    max_iv: 150 },
-};
-
 function mapApiOptimalToFormInputs(params) {
   if (!params) return null;
   const pct = (v) => (v == null ? undefined : Math.round(Number(v) * 1000) / 10);
@@ -1686,6 +1692,26 @@ function mapApiOptimalToFormInputs(params) {
     max_spread:  params.max_quantile_spread,
     max_iv:      params.max_iv || 0,
   };
+}
+
+/**
+ * Build a synthetic state.optimalParams object from the consolidated
+ * strategy_defaults.json (served by /api/ml/strategy-defaults and stored in
+ * state.strategyDefaults). Produces the same { [strategy_type]: { params } } shape
+ * that the sweep_optimal.json served via /api/ml/optimal-params would produce,
+ * so the change handler at L1767 and the submit path can consume both with no
+ * branching. This replaces the deleted FALLBACK_OPT_PARAMS hardcoded map.
+ *
+ * pct2(0.05) === 5 (numbers, not strings) — sanity-checked at call sites.
+ */
+function _buildOptimalParamsFromStrategyDefaults(strategyDefaults) {
+  const out = {};
+  if (!strategyDefaults || typeof strategyDefaults !== 'object') return out;
+  const strategies = strategyDefaults.strategies || {};
+  for (const [name, params] of Object.entries(strategies)) {
+    out[name] = { params };
+  }
+  return out;
 }
 
 async function loadOptimalParams() {
@@ -1706,7 +1732,11 @@ async function loadOptimalParams() {
     console.warn(`[strategy-defaults] fetch failed: ${e.message} — using fallback values`);
   }
 
-  // Load sweep-optimal params (overrides defaults if available)
+  // Load sweep-optimal params (overrides defaults if available).
+  // If /api/ml/optimal-params is unavailable (sweep_optimal.json missing),
+  // fall back to the consolidated strategy_defaults served by /api/ml/strategy-defaults
+  // (already loaded into state.strategyDefaults above) so the form is still
+  // populated from the single source of truth instead of a hardcoded JS map.
   try {
     const r = await fetch(`${API_BASE}/api/ml/optimal-params`, { signal: AbortSignal.timeout(5000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1716,14 +1746,14 @@ async function loadOptimalParams() {
       state.optimalParamsSource = data.evaluation || 'unknown';
       console.info(`[optimal-params] loaded ${Object.keys(data.optimal).length} strategies from ${data.path}`);
     } else {
-      state.optimalParams = null;
-      state.optimalParamsSource = 'unavailable';
-      console.warn('[optimal-params] sweep_optimal.json not found — using fallback (in-sample) values');
+      state.optimalParams = _buildOptimalParamsFromStrategyDefaults(state.strategyDefaults);
+      state.optimalParamsSource = 'strategy_defaults';
+      console.info('[optimal-params] sweep_optimal.json unavailable — using strategy_defaults.json (single source of truth)');
     }
   } catch (e) {
-    state.optimalParams = null;
-    state.optimalParamsSource = 'unavailable';
-    console.warn(`[optimal-params] fetch failed: ${e.message} — using fallback values`);
+    state.optimalParams = _buildOptimalParamsFromStrategyDefaults(state.strategyDefaults);
+    state.optimalParamsSource = 'strategy_defaults';
+    console.info(`[optimal-params] fetch failed: ${e.message} — using strategy_defaults.json`);
   }
 
   // Auto-populate form inputs for initial strategy selection
@@ -1750,11 +1780,13 @@ async function loadOptimalParams() {
       }
     });
 
-    // Populate the form from the latest sweep_optimal.json served by the backend.
-    // Falls back to a hardcoded map (in-sample-only, not for trading) if the file is missing.
+    // Populate the form from the latest sweep_optimal.json served by the backend,
+    // or from the consolidated strategy_defaults.json if sweep_optimal.json is
+    // unavailable. Both paths flow through state.optimalParams (single source of
+    // truth in backend/config/strategy_defaults.json) — see _buildOptimalParamsFromStrategyDefaults.
     const p = (state.optimalParams && state.optimalParams[val] && state.optimalParams[val].params)
       ? mapApiOptimalToFormInputs(state.optimalParams[val].params)
-      : (FALLBACK_OPT_PARAMS[val] || null);
+      : null;
     if (p) {
       if (p.prob !== undefined && $('bt-prob-threshold')) $('bt-prob-threshold').value = p.prob;
       if (p.kelly !== undefined && $('bt-kelly-multiplier')) {
@@ -2091,10 +2123,10 @@ async function loadDefaultBacktestCache() {
       loadBacktestData(data);
       return;
     }
-    console.warn('Default cache endpoint returned non-OK, running simulation...');
+    console.warn('Default cache endpoint returned non-OK. Skipping automatic simulation on startup.');
     state.backtestLoading = false;
     setLoading('backtest-loading', false);
-    await runBacktestSimulation();
+    // await runBacktestSimulation();
   } catch (err) {
     console.warn('Failed to fetch default backtest cache or run simulation:', err.message);
   } finally {
@@ -2226,7 +2258,7 @@ async function runBacktestSimulation(e) {
       const totalCombos = kellyList.length * stopList.length;
       if (totalCombos > 20) {
         if (!state.booting) {
-          alert(`The parameter grid has ${totalCombos} combinations. Please adjust min/max/step values so that total combinations are 20 or fewer.`);
+          showToast(`The parameter grid has ${totalCombos} combinations. Please adjust min/max/step values so that total combinations are 20 or fewer.`, 'error');
         } else {
           console.warn(`Boot backtest sweep combo count exceeds 20: ${totalCombos}`);
         }
@@ -2334,7 +2366,7 @@ async function runBacktestSimulation(e) {
       const data = await r.json();
       if (!r.ok) {
         if (!state.booting) {
-          alert(`Backtest Failed: ${data.detail || 'Unknown error'}`);
+          showToast(`Backtest Failed: ${data.detail || 'Unknown error'}`, 'error');
         } else {
           console.error(`Boot backtest failed: ${data.detail || 'Unknown error'}`);
         }
@@ -2349,7 +2381,7 @@ async function runBacktestSimulation(e) {
       loadBacktestData(data);
     }
   } catch (err) {
-    alert(`Simulation failed: ${err.message}`);
+    showToast(`Simulation failed: ${err.message}`, 'error');
     console.error('Backtest error:', err);
   } finally {
     setLoading('backtest-loading', false);
@@ -2722,4 +2754,42 @@ function renderBacktestLedgerTable() {
       </tr>
     `;
   }).join('');
+}
+
+// ── Toast Notification System ─────────────────────────────────
+function showToast(msg, type = 'error') {
+  if (msg.includes('TimeoutError') || msg.includes('AbortError') || msg.includes('The operation was aborted')) {
+    msg = 'Request timed out. The server might be busy or offline.';
+  }
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.style.position = 'fixed';
+    container.style.bottom = '20px';
+    container.style.right = '20px';
+    container.style.zIndex = '9999';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.gap = '10px';
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement('div');
+  toast.textContent = msg;
+  toast.style.background = type === 'error' ? 'var(--bg-loss, #ffebee)' : 'var(--bg-profit, #e8f5e9)';
+  toast.style.color = type === 'error' ? 'var(--color-loss, #8b3a3a)' : 'var(--color-profit, #2d7a4a)';
+  toast.style.padding = '12px 16px';
+  toast.style.borderRadius = '4px';
+  toast.style.border = '1px solid ' + (type === 'error' ? 'var(--color-loss, #8b3a3a)' : 'var(--color-profit, #2d7a4a)');
+  toast.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
+  toast.style.fontFamily = 'var(--font-mono, monospace)';
+  toast.style.fontSize = '12px';
+  toast.style.opacity = '0';
+  toast.style.transition = 'opacity 0.3s ease';
+  container.appendChild(toast);
+  setTimeout(() => toast.style.opacity = '1', 10);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 300);
+  }, 5000);
 }
