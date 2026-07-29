@@ -1,9 +1,9 @@
 {
   "_comment": "Consolidated default parameters for all strategies. Single source of truth — frontend, backend, and HTML defaults must all reference this file (or its API). Update one place, propagate everywhere.",
-  "_updated": "2026-07-28",
+  "_updated": "2026-07-29",
   "_sweep_source": "scripts/sweep_strategies_v2.py",
-  "_sweep_dataset": "real (is_synthetic=0), walkforward 500/100, ~68k labeled trades",
-  "_notes": "Values calibrated by the v2 sweep against real data. Realistic options-trading ranges: profit_threshold 15-50%, hard_stop_loss 15-40%, kelly_cap 5-20%. Values outside those ranges are bugs.",
+  "_sweep_dataset": "synthetic-only (is_synthetic=1, 5 ensembles), walkforward 500/100, use_costs=True, cost-adjusted P&L",
+  "_notes": "Values calibrated by v2 sweep on synthetic dataset. Realistic options-trading ranges: profit_threshold 15-50%, hard_stop_loss 15-40%, kelly_cap 5-20%. Values outside those ranges are bugs.",
 
   "common": {
     "initial_capital": 100000.0,
@@ -14,50 +14,49 @@
     "lookback_days": null,
     "min_open_interest": 100,
     "scan_time": "10:00:00",
-    "max_risk_pct_per_trade": 0.02
+    "max_risk_pct_per_trade": 0.02,
+    "use_costs": true
   },
 
   "strategies": {
     "whale_quality": {
       "strategy_type": "whale_quality",
-      "prob_threshold": 0.372,
-      "kelly_multiplier": 0.873,
-      "kelly_cap": 0.066,
-      "hard_stop_loss": 0.173,
+      "prob_threshold": 0.364,
+      "kelly_multiplier": 0.781,
+      "kelly_cap": 0.12,
+      "hard_stop_loss": 0.197,
       "stop_lambda": 1.5,
-      "max_quantile_spread": 0.306,
-      "min_median_return": 0.01,
-      "max_iv": 109.109,
-      "max_concurrent_trades": 6,
-      "profit_threshold": 0.456
+      "max_quantile_spread": 0.132,
+      "min_median_return": 0.025,
+      "max_iv": 84.449,
+      "max_concurrent_trades": 10,
+      "profit_threshold": 0.404
     },
-
     "contrarian_trend": {
       "strategy_type": "contrarian_trend",
-      "prob_threshold": 0.426,
-      "kelly_multiplier": 0.718,
-      "kelly_cap": 0.11,
-      "hard_stop_loss": 0.177,
+      "prob_threshold": 0.496,
+      "kelly_multiplier": 0.92,
+      "kelly_cap": 0.187,
+      "hard_stop_loss": 0.265,
       "stop_lambda": 1.5,
       "max_quantile_spread": 0.0,
       "min_median_return": 0.0,
-      "max_iv": 58.907,
+      "max_iv": 117.116,
       "max_concurrent_trades": 9,
-      "profit_threshold": 0.418
+      "profit_threshold": 0.486
     },
-
     "vol_regime": {
       "strategy_type": "vol_regime",
-      "prob_threshold": 0.43,
-      "kelly_multiplier": 0.968,
-      "kelly_cap": 0.163,
-      "hard_stop_loss": 0.204,
+      "prob_threshold": 0.363,
+      "kelly_multiplier": 0.644,
+      "kelly_cap": 0.173,
+      "hard_stop_loss": 0.395,
       "stop_lambda": 1.5,
-      "max_quantile_spread": 0.337,
+      "max_quantile_spread": 0.143,
       "min_median_return": 0.0,
-      "max_iv": 70.685,
-      "max_concurrent_trades": 10,
-      "profit_threshold": 0.442
+      "max_iv": 86.723,
+      "max_concurrent_trades": 5,
+      "profit_threshold": 0.386
     }
   }
 }

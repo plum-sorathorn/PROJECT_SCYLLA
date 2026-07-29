@@ -10,7 +10,11 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Instrument+Serif:ital,wght@0,400;0,400i;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/pages.css" />
+  <link rel="stylesheet" href="css/responsive.css" />
 </head>
 <body>
 
@@ -542,9 +546,9 @@
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">STRATEGY TYPE</label>
               <select id="bt-strategy-type" class="filter-select">
-                <option value="vol_regime" selected>Vol Regime (OOS: +17.1% / 5.8yr, Sharpe 1.16, 213 trades)</option>
-                <option value="contrarian_trend">Contrarian Trend (OOS: +6.9% / 5.8yr, Sharpe 1.35, 46 trades)</option>
-                <option value="whale_quality">Whale Quality (OOS: +1.6% / 5.8yr, Sharpe 0.48, 40 trades)</option>
+                <option value="vol_regime" selected>Vol Regime (OOS: +17.2% / 9.7yr, Sharpe 1.57, 61 trades)</option>
+                <option value="contrarian_trend">Contrarian Trend (OOS: +107.8% / 9.7yr, Sharpe 3.18, 107 trades)</option>
+                <option value="whale_quality">Whale Quality (OOS: +115.2% / 9.7yr, Sharpe 2.62, 123 trades)</option>
               </select>
             </div>
 
@@ -717,14 +721,6 @@
           <!-- Bottom bar: Sweep Toggle and Run Button -->
           <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px;">
             <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-              <label class="synthetic-toggle" id="bt-use-synthetic-toggle">
-                <input type="checkbox" id="bt-use-synthetic" checked />
-                <span class="synthetic-toggle-pill">
-                  <span class="synthetic-toggle-dot"></span>
-                </span>
-                <span class="synthetic-toggle-label">USE SYNTHETIC DATA <span style="opacity: 0.65; font-size: 10px; letter-spacing: 0.5px;">(TUNED STRATEGIES)</span></span>
-                <span class="filter-hint" title="When ON, backtest runs on the synthetic 68,802-trade dataset (is_synthetic=1). Turn OFF to use real scanner output (still being labeled).">?</span>
-              </label>
               <label class="filter-label checkbox-label" style="margin-left: 0; user-select: none; cursor: pointer;">
                 <input type="checkbox" id="bt-sweep-enable" class="filter-checkbox" />
                 ENABLE PARAMETER SWEEP GRID (Kelly × λ)
@@ -1106,6 +1102,13 @@
 
 </div> <!-- .app-container -->
 
+<script src="js/state.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/api.js"></script>
+<script src="js/scanner.js"></script>
+<script src="js/ml.js"></script>
+<script src="js/backtest.js"></script>
+<script src="js/dashboard.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

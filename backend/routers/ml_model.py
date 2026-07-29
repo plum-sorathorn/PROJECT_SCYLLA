@@ -7,43 +7,102 @@ import datetime
 import os
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import pickle
 import joblib
 import lightgbm as lgb
-import httpx
 import requests
 import logging
+import yfinance as yf
 from .ml_derivations import compute_calibrated_p_success, classify_strategy, kelly_fraction, kelly_fraction_realized
 from ._yf_safe import safe_call
 
 import threading
 import concurrent.futures
-import math
 import time
 
 from .utils import _sanitize_float_values
 
+# ── Imports from new sub-modules (try/except handles both
+#     "from backend.routers.ml_model" and "from routers import ml_model" contexts)
+try:
+    # When loaded as backend.routers.ml_model (project root context)
+    from ..config.constants import (  # type: ignore[import-untyped]
+        DB_PATH, CACHE_DIR, MODEL_PATH, _SCYLLA_MAX_PROC,
+        LABELING_VERSION, _CPP_CORE_URL, BOOT_CACHE_PATH,
+        SWEEP_OPTIMAL_PATHS, STRATEGY_DEFAULTS_PATH,
+    )
+    from ..db.schema import init_db
+    from ..db.queries import (  # type: ignore[import-untyped]
+        _execute_with_retry, _fetch_trades_from_db,
+        get_real_trades, get_dataset_stats,
+    )
+    from ..models.features import (  # type: ignore[import-untyped]
+        _fetch_historical_volatility, _fetch_vix_level,
+        _dte_to_bucket, compute_advanced_features,
+        get_hv_cache, get_vix_cache,
+    )
+    from ..models.tier_a import (  # type: ignore[import-untyped]
+        _compute_tier_a_tickers, _compute_tier_profitable_tickers,
+        TIER_PROFITABLE_TICKERS,
+    )
+    from ..models.predict import (  # type: ignore[import-untyped]
+        _cpp_batch_predict, enforce_monotonic_quantiles,
+        _get_cache_hash, _check_prediction_cache, _save_prediction_cache,
+    )
+    from ..models.train import _fit_one_quantile_train, _serialize_cpp_inference_artifacts  # type: ignore[import-untyped]
+    from ..backtest.walkforward import _wf_worker_init, _process_walkforward_step  # type: ignore[import-untyped]
+    from ..config._strategy_loader import get_strategy_params, get_common_params  # type: ignore[import-untyped]
+except ImportError:
+    # When loaded as routers.ml_model (backend/ directory context)
+    from config.constants import (  # type: ignore[import-untyped]
+        DB_PATH, CACHE_DIR, MODEL_PATH, _SCYLLA_MAX_PROC,
+        LABELING_VERSION, _CPP_CORE_URL, BOOT_CACHE_PATH,
+        SWEEP_OPTIMAL_PATHS, STRATEGY_DEFAULTS_PATH,
+    )
+    from db.schema import init_db
+    from db.queries import (  # type: ignore[import-untyped]
+        _execute_with_retry, _fetch_trades_from_db,
+        get_real_trades, get_dataset_stats,
+    )
+    from models.features import (  # type: ignore[import-untyped]
+        _fetch_historical_volatility, _fetch_vix_level,
+        _dte_to_bucket, compute_advanced_features,
+        get_hv_cache, get_vix_cache,
+    )
+    from models.tier_a import (  # type: ignore[import-untyped]
+        _compute_tier_a_tickers, _compute_tier_profitable_tickers,
+        TIER_PROFITABLE_TICKERS,
+    )
+    from models.predict import (  # type: ignore[import-untyped]
+        _cpp_batch_predict, enforce_monotonic_quantiles,
+        _get_cache_hash, _check_prediction_cache, _save_prediction_cache,
+    )
+    from models.train import _fit_one_quantile_train, _serialize_cpp_inference_artifacts  # type: ignore[import-untyped]
+    from backtest.walkforward import _wf_worker_init, _process_walkforward_step  # type: ignore[import-untyped]
+    from config._strategy_loader import get_strategy_params, get_common_params  # type: ignore[import-untyped]
+
 logger = logging.getLogger("scylla.ml_model")
 router = APIRouter()
 
-
-# Paths relative to the backend directory
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../scylla_ml.db"))
-CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../cache"))
-MODEL_PATH = os.path.join(CACHE_DIR, "scylla_predictor.pkl")
-
-LABELING_VERSION = "v2_settlement"
-
 # ── In-memory caches for expensive market data lookups ───────
-_hv_cache = {}   # ticker -> annualized HV
-_vix_cache = {"value": None, "ts": None}  # cached VIX level
+# These are re-exported from models.features so that _fetch_historical_volatility
+# and _fetch_vix_level (the authoritative implementations) write to the SAME
+# dicts that the remaining endpoint code reads from.
+_hv_cache = get_hv_cache()   # ticker -> annualized HV (same object as models.features._hv_cache)
+_vix_cache = get_vix_cache()  # cached VIX level (same object as models.features._vix_cache)
 _settings_cache = {"data": None, "ts": 0.0}  # TTL cache for _get_settings()
 _SETTINGS_TTL_SEC = 60.0
 _global_model = None
 _backtest_response_cache = {}
 _walkforward_lock = threading.Lock()
 _walkforward_cache_mem = {}
+
+# ── Walkforward process-pool shared state ──────────────────────
+# On fork-based platforms (Linux/macOS) the child inherits these
+# from the parent. On spawn-based platforms (Windows) the initializer
+# _wf_worker_init() sets them in each worker. Each worker receives the
+# full dataset pickled exactly once, not once per task submission.
+_WF_DF_REAL = None
+_WF_DF_REAL_FEAT = None
 
 
 def get_global_model():
@@ -61,64 +120,12 @@ def get_global_model():
     return None
 
 
-_async_http_client: Optional[httpx.AsyncClient] = None
-
-
-def _get_async_http_client() -> httpx.AsyncClient:
-    global _async_http_client
-    if _async_http_client is None:
-        _async_http_client = httpx.AsyncClient()
-    return _async_http_client
-
-
 def _prefetch_historical_vols(tickers) -> None:
     if not tickers:
         return
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(4, min(20, len(tickers)))) as executor:
         futures = [executor.submit(_fetch_historical_volatility, t) for t in tickers]
         concurrent.futures.wait(futures, timeout=None)
-
-
-def _fetch_trades_from_db(query: str, params: list) -> pd.DataFrame:
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        return pd.read_sql_query(query, conn, params=params)
-    finally:
-        conn.close()
-
-
-def _fit_one_quantile_train(args):
-    """
-    Module-level helper for ProcessPoolExecutor (PARALLELIZATION_PLAN §4.1 / §4.2).
-    Must be at module scope so multiprocessing can pickle it by name on Windows.
-
-    args: (q, X_train, y_train, preprocessor, n_estimators, learning_rate,
-            num_leaves, min_child_samples, reg_lambda)
-    Returns: (q, fitted_Pipeline)
-    """
-    from sklearn.pipeline import Pipeline
-    import lightgbm as lgb
-
-    (q, X_train, y_train, preprocessor, n_estimators,
-     learning_rate, num_leaves, min_child_samples, reg_lambda) = args
-
-    pipe = Pipeline([
-        ("preprocess", preprocessor),
-        ("regressor", lgb.LGBMRegressor(
-            objective="quantile",
-            alpha=q,
-            n_estimators=n_estimators,
-            learning_rate=learning_rate,
-            num_leaves=num_leaves,
-            min_child_samples=min_child_samples,
-            reg_lambda=reg_lambda,
-            n_jobs=2,          # 2 cores per model × 5 workers = 10 cores
-            random_state=42,
-            verbose=-1,
-        ))
-    ])
-    pipe.fit(X_train, y_train)
-    return q, pipe
 
 
 class TradeSchema(BaseModel):
@@ -137,58 +144,6 @@ class TradeSchema(BaseModel):
     isWeekly: bool
     trendAlignment: str
 
-
-
-# C++ native inference engine URL (port 8080, hardcoded per AGENTS.md convention)
-_CPP_CORE_URL = "http://127.0.0.1:8080"
-
-
-async def _cpp_batch_predict(rows: list[dict], timeout: float = 8.0) -> list[dict] | None:
-    """
-    PARALLELIZATION_PLAN §3.3 / Steps 15-16: delegate batch ML inference to the
-    C++ InferenceEngine via /api/v1/ml/predict-batch on port 8080.
-
-    Sends a list of row dicts (each with option fields) and returns a parallel
-    list of prediction dicts containing quantiles, p_success, strategy,
-    kelly_fraction.  Returns None if C++ is unreachable or returns an error,
-    so callers can fall back to the Python sklearn model path.
-
-    Args:
-        rows:    list of dicts with keys: ticker, underlier_price, strike,
-                 volume, open_interest, implied_vol, premium, option_type,
-                 side, dte, is_weekly, trend_alignment.
-        timeout: per-request timeout in seconds (default 8s).
-    Returns:
-        list of prediction dicts on success, or None on failure.
-    """
-    if not rows:
-        return []
-    client = _get_async_http_client()
-    try:
-        resp = await client.post(
-            f"{_CPP_CORE_URL}/api/v1/ml/predict-batch",
-            json={"rows": rows},
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            logger.warning(
-                f"[cpp_batch] HTTP {resp.status_code}: {resp.text[:200]}"
-            )
-            return None
-        data = resp.json()
-        predictions = data.get("predictions")
-        if not isinstance(predictions, list) or len(predictions) != len(rows):
-            logger.warning(
-                f"[cpp_batch] Unexpected response shape: {str(data)[:200]}"
-            )
-            return None
-        return predictions
-    except httpx.ConnectError:
-        # scylla_core.exe not running — fall back to Python path silently
-        return None
-    except Exception as exc:
-        logger.warning(f"[cpp_batch] Error calling C++ predict-batch: {exc}")
-        return None
 
 
 class PredictRequestSchema(BaseModel):
@@ -221,248 +176,8 @@ class PredictResponseSchema(BaseModel):
     kelly_fraction_uncapped: float
     model_type: Optional[str] = None
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    # Enable WAL mode for better concurrency (allows reads during writes)
-    conn.execute("PRAGMA journal_mode=WAL")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS options_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            ticker TEXT NOT NULL,
-            expiration TEXT NOT NULL,
-            strike REAL NOT NULL,
-            option_type TEXT NOT NULL,
-            volume INTEGER NOT NULL,
-            open_interest INTEGER NOT NULL,
-            vol_oi_ratio REAL NOT NULL,
-            implied_vol REAL NOT NULL,
-            underlier_price REAL NOT NULL,
-            premium REAL NOT NULL,
-            side TEXT NOT NULL,
-            dte INTEGER NOT NULL,
-            is_weekly INTEGER NOT NULL,
-            trend_alignment TEXT NOT NULL,
-            labeled INTEGER DEFAULT 0,
-            label_success INTEGER DEFAULT NULL,
-            observed_return REAL DEFAULT NULL,
-            max_adverse_return REAL DEFAULT NULL,
-            evaluation_date TEXT DEFAULT NULL,
-            is_synthetic INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-    # Indexes (idempotent via IF NOT EXISTS)
-    # 1. ticker+timestamp DESC: serves api_get_trades (filter by ticker, sort by timestamp)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticker_ts ON options_trades(ticker, timestamp DESC)")
-    # 2. labeled+timestamp: serves labeling worker scan of unlabeled rows
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_labeled_ts ON options_trades(labeled, timestamp)")
-    # 3. dedup tuple: serves dedup equality lookup on (ticker, strike, expiration, option_type, vol_oi_ratio, timestamp)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_dedup ON options_trades(ticker, strike, expiration, option_type, vol_oi_ratio, timestamp)")
-
-    # MLOps training run audit log
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS model_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            samples_count INTEGER NOT NULL,
-            train_accuracy REAL,
-            test_accuracy REAL,
-            test_precision REAL,
-            test_recall REAL,
-            test_f1 REAL,
-            test_roc_auc REAL,
-            cv_roc_auc_mean REAL,
-            horizon_days INTEGER,
-            profit_threshold REAL,
-            model_version TEXT,
-            pinball_loss_p10 REAL DEFAULT NULL,
-            pinball_loss_p25 REAL DEFAULT NULL,
-            pinball_loss_p50 REAL DEFAULT NULL,
-            pinball_loss_p75 REAL DEFAULT NULL,
-            pinball_loss_p90 REAL DEFAULT NULL
-        )
-    """)
-
-    # Configurable ML settings (horizon, threshold, etc.)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ml_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    # Prediction cache to prevent re-running inference for identical inputs + model version
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS prediction_cache (
-            input_hash TEXT PRIMARY KEY,
-            model_version TEXT NOT NULL,
-            prediction_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-    # Seed defaults if not present
-    cursor.execute("INSERT OR IGNORE INTO ml_settings (key, value) VALUES ('horizon_days', '10')")
-    cursor.execute("INSERT OR IGNORE INTO ml_settings (key, value) VALUES ('profit_threshold', '0.03')")
-
-    # Run ALTER TABLE command to verify columns exist
-    try:
-        cursor.execute("ALTER TABLE options_trades ADD COLUMN max_adverse_return REAL DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE options_trades ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
-        # Backfill mock trades
-        cursor.execute("UPDATE options_trades SET is_synthetic = 1 WHERE expiration = '2026-08-20' AND volume = 1000 AND open_interest = 200")
-        conn.commit()
-        logger.info("Migrated options_trades: added is_synthetic and backfilled 100 mock trades.")
-    except sqlite3.OperationalError:
-        pass
-
-    for q_col in ["pinball_loss_p10", "pinball_loss_p25", "pinball_loss_p50", "pinball_loss_p75", "pinball_loss_p90"]:
-        try:
-            cursor.execute(f"ALTER TABLE model_runs ADD COLUMN {q_col} REAL DEFAULT NULL")
-        except sqlite3.OperationalError:
-            pass
-
-    conn.commit()
-
-    # Startup/health-check log line reporting counts
-    try:
-        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE is_synthetic = 1")
-        synth_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM options_trades WHERE is_synthetic = 0")
-        real_count = cursor.fetchone()[0]
-        logger.info(f"Database health check: options_trades has {real_count} real trades (is_synthetic=0) and {synth_count} synthetic trades (is_synthetic=1).")
-    except Exception as e:
-        logger.warning(f"Failed to count synthetic vs real trades during startup: {e}")
-
-    conn.close()
-
-
-# Ensure database is initialized on import
-init_db()
-
-
-# ═══════════════════════════════════════════════════════════════
-# ADVANCED FEATURE ENGINEERING
-# ═══════════════════════════════════════════════════════════════
-
-def _fetch_historical_volatility(ticker: str) -> float:
-    """Fetch 30-day annualized historical volatility for a ticker (cached)."""
-    global _hv_cache
-    if ticker in _hv_cache:
-        return _hv_cache[ticker]
-    try:
-        tk = safe_call(yf.Ticker, ticker, retries=1)
-        hist = safe_call(lambda t: t.history(period="3mo"), tk)
-        if hist.empty or len(hist) < 5:
-            _hv_cache[ticker] = 0.0
-            return 0.0
-        log_returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
-        # Annualized std of log returns (252 trading days)
-        hv = float(log_returns.std() * np.sqrt(252) * 100)  # as percentage
-        _hv_cache[ticker] = hv
-        return hv
-    except Exception as ex:
-        logger.warning(f"HV fetch failed for {ticker}: {ex}")
-        _hv_cache[ticker] = 0.0
-        return 0.0
-
-
-def _fetch_vix_level() -> float:
-    """Fetch current VIX level (cached for 5 minutes)."""
-    global _vix_cache
-    now = datetime.datetime.now()
-    if _vix_cache["value"] is not None and _vix_cache["ts"] is not None:
-        elapsed = (now - _vix_cache["ts"]).total_seconds()
-        if elapsed < 300:  # 5-minute cache
-            return _vix_cache["value"]
-    try:
-        vix = safe_call(yf.Ticker, "^VIX", retries=1)
-        hist = safe_call(lambda t: t.history(period="5d"), vix)
-        if hist.empty:
-            _vix_cache["value"] = 20.0
-            _vix_cache["ts"] = now
-            return 20.0
-        val = float(hist['Close'].iloc[-1])
-        _vix_cache["value"] = val
-        _vix_cache["ts"] = now
-        return val
-    except Exception as ex:
-        logger.warning(f"VIX fetch failed: {ex}")
-        _vix_cache["value"] = 20.0
-        _vix_cache["ts"] = now
-        return 20.0
-
-
-def _dte_to_bucket(dte: int) -> str:
-    """Categorize DTE into labeled buckets."""
-    if dte <= 7:
-        return "weekly"
-    elif dte <= 30:
-        return "short"
-    elif dte <= 60:
-        return "medium"
-    else:
-        return "long"
-
-
-def compute_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute engineered features from raw trade columns.
-    Adds: moneyness, iv_hv_ratio, vix_level, log_premium, dte_bucket.
-    Prevents lookahead leakage by avoiding live yfinance calls on historical datasets.
-    """
-    df = df.copy()
-
-    # 1. Moneyness: percentage distance from spot
-    df['moneyness'] = (df['strike'] - df['underlier_price']) / df['underlier_price']
-
-    # 2. IV / HV ratio per ticker
-    if 'iv_hv_ratio' not in df.columns:
-        if len(df) > 10:
-            # PHASE A (5.2): DEFERRED — would require _fetch_hv_at(ticker, ts) per unique
-            # ticker as of median timestamp, then iv/median_hv. Yfinance historical
-            # fetches are rate-limited (~1-3s per ticker × 50 tickers = 1-3 min per
-            # training run), and the v2_settlement labels are noisy enough that the
-            # IV/HV-ratio feature is a secondary signal — the strategy filter rules
-            # in api_backtest carry more weight. Leaving baseline constant (25.0) for
-            # now. TODO(phase_b): implement _fetch_hv_at with disk cache.
-            df['iv_hv_ratio'] = df['implied_vol'] / 25.0
-        else:
-            # Live inference mode: fetch current HV
-            tickers = df['ticker'].unique() if 'ticker' in df.columns else []
-            for t in tickers:
-                _fetch_historical_volatility(t)
-
-            def _iv_hv_ratio(row):
-                hv = _hv_cache.get(row.get('ticker', ''), 0.0)
-                iv = row.get('implied_vol', 0.0)
-                return iv / hv if hv > 0 else 1.0
-
-            df['iv_hv_ratio'] = df.apply(_iv_hv_ratio, axis=1) if 'ticker' in df.columns else 1.0
-
-    # 3. VIX level (global market regime)
-    if 'vix_level' not in df.columns:
-        if len(df) > 10:
-            # PHASE A (5.2): DEFERRED — same reason as iv_hv_ratio above.
-            # Would call _fetch_vix_at(median_ts) for a single historical point
-            # estimate. Risk: median timestamp may be in 2024 but yfinance may not
-            # have data going back that far for ^VIX without premium access.
-            # TODO(phase_b): implement _fetch_vix_at with disk cache.
-            df['vix_level'] = 20.0
-        else:
-            df['vix_level'] = _fetch_vix_level()
-
-    # 4. Log-scaled premium
-    df['log_premium'] = np.log1p(df['premium'].clip(lower=0))
-
-    # 5. DTE bucket
-    df['dte_bucket'] = df['dte'].apply(_dte_to_bucket)
-
-    return df
-
+# (init_db() and auto-call moved → backend/db/schema.py, see import above)
+# (Feature engineering functions moved → backend/models/features.py, see import above)
 
 # ═══════════════════════════════════════════════════════════════
 # SETTINGS ENDPOINTS
@@ -484,152 +199,7 @@ def _get_settings() -> dict:
     return result
 
 
-# PHASE A (5.4): TIER_A_TICKERS — universe filter for new strategies.
-# Lazy-initialized: computed on first call from past-year labeled real trades
-# with >= 30% win rate (where win = observed_return >= profit_threshold) and
-# at least 10 trades. This empirically restricts the strategy to tickers where
-# the v2_settlement labeling actually has positive signal, rather than
-# "scanning" the whole market and diluting with noise tickers.
-_TIER_A_TICKERS_CACHE = None
-_TIER_A_TICKERS_LOCK = threading.Lock()
-
-
-def _compute_tier_a_tickers() -> set:
-    """Return the set of tickers that meet TIER_A criteria.
-
-    Cached at module level for the lifetime of the process. If the DB is
-    unavailable or has < 1 year of data, returns an empty set (which means
-    NO trade will pass the new strategy filters — a safe default for the
-    pre-Phase-C cutover).
-    """
-    global _TIER_A_TICKERS_CACHE
-    if _TIER_A_TICKERS_CACHE is not None:
-        return _TIER_A_TICKERS_CACHE
-    with _TIER_A_TICKERS_LOCK:
-        if _TIER_A_TICKERS_CACHE is not None:
-            return _TIER_A_TICKERS_CACHE
-        try:
-            # WR threshold is fixed at 3% (modest profit) for TIER_A membership.
-            # We intentionally do NOT use the ml_settings.profit_threshold value
-            # because that setting is the ML-training label threshold (often
-            # 0.50 in production), which is far too strict for "ticker has
-            # positive signal" detection. A ticker that wins 30%+ of trades
-            # with >= 3% return is the right universe for our strategies.
-            target_pct = 0.03
-            conn = sqlite3.connect(DB_PATH)
-            # Use MAX(timestamp) in the DB (not `now`) as the reference so the
-            # query is robust to DBs that haven't been updated recently
-            # (e.g. a verification run on a 1-year-old snapshot). The plan's
-            # original `date('now', '-1 year')` would return an empty set if
-            # the data is older than 1 year.
-            max_ts_row = pd.read_sql_query(
-                "SELECT MAX(timestamp) as max_ts FROM options_trades WHERE labeled = 1",
-                conn,
-            )
-            conn.close()
-            max_ts = max_ts_row["max_ts"].iloc[0]
-            if not max_ts:
-                logger.warning("TIER_A_TICKERS: no labeled trades in DB")
-                _TIER_A_TICKERS_CACHE = set()
-                return _TIER_A_TICKERS_CACHE
-            # Cutoff = max_ts - 1 year. SQLite stores timestamps as strings,
-            # so use string comparison (ISO 8601 sorts lexicographically).
-            cutoff = (pd.to_datetime(max_ts) - pd.Timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S")
-            conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql_query("""
-                SELECT ticker,
-                       AVG(CASE WHEN observed_return >= ? THEN 1.0 ELSE 0.0 END) as wr,
-                       COUNT(*) as n
-                FROM options_trades
-                WHERE labeled = 1 AND is_synthetic = 0
-                  AND timestamp >= ?
-                GROUP BY ticker
-                HAVING n >= 10 AND wr >= 0.30
-                ORDER BY wr DESC
-            """, conn, params=[target_pct, cutoff])
-            conn.close()
-            _TIER_A_TICKERS_CACHE = set(df['ticker'].tolist())
-            logger.info(
-                f"TIER_A_TICKERS computed: {len(_TIER_A_TICKERS_CACHE)} tickers meet criteria "
-                f"(cutoff={cutoff}, target_pct={target_pct}, top 5: {list(_TIER_A_TICKERS_CACHE)[:5]})"
-            )
-            return _TIER_A_TICKERS_CACHE
-        except Exception as ex:
-            logger.warning(f"Failed to compute TIER_A_TICKERS: {ex}")
-            _TIER_A_TICKERS_CACHE = set()
-            return _TIER_A_TICKERS_CACHE
-
-
-# TIER_PROFITABLE_TICKERS: v1 hardcoded universe identified by the Phase A
-# per-ticker diagnostic. These underlyings produced positive PnL across
-# multiple strategies; the rest (TSLA, NVDA, AMD, META, MSFT, AMZN, GOOGL, ARKK)
-# were perennially unprofitable. Next retrain should re-evaluate via
-# walkforward on a rolling 6-month lookback.
-TIER_PROFITABLE_TICKERS = {
-    "IWM", "JPM", "BAC", "GS", "CVX", "AAPL", "BABA"
-}
-
-
-# ═══════════════════════════════════════════════════════════════
-# PHASE A (synthetic) TUNING NOTES — see scripts/verify_phase_a.py
-# ═══════════════════════════════════════════════════════════════
-# Empirically measured on the 68,802 synthetic trades (seed_grounded_real_options.py):
-#
-#   vol_oi_ratio distribution (synthetic):
-#     p50=0.21, p75=0.31, p90=0.47, p95=0.58, p99=0.78
-#   observed_return distribution (synthetic):
-#     min=-1.0, median=-0.114, mean=+0.088, max=+3.0
-#   max_adverse_return distribution (synthetic):
-#     p25=-0.90, p50=-0.55, p75=-0.18, p90=0.0  (extremely noisy)
-#   empirical win rate (WR = P(observed_return >= X)):
-#     X=0.03 -> 44.7%   X=0.05 -> 44.0%   X=0.10 -> 42.1%
-#     X=0.20 -> 38.7%   X=0.50 -> 28.8%   X=1.00 -> 12.2%
-#
-# KEY INSIGHT (lottery-ticket payoff structure): the synthetic data has
-# a mean observed_return of +8.8% driven by a fat right tail (max +3.0).
-# With a tight hard stop (4% on max_adverse_return, which fires on 80%+
-# of trades) and a wide profit cap (50%), the backtest captures the
-# lottery payoff: many small losers (5%) funded by occasional big winners
-# (+50%). Per-trade expected = 0.20*0.50 - 0.80*0.05 = +6% → large
-# walkforward PnL.
-#
-# Tuning choices for synth_mode (use_synthetic=True):
-#   * TIER_PROFITABLE_TICKERS gate BYPASSED — the synthetic universe is
-#     positive-EV by construction (50 tickers, 40-48% success each); gating
-#     to the 7-ticker TIER_A would shrink the candidate pool 7x and the
-#     walkforward would produce <30 trades.
-#   * vol_oi floor: 0.5 (whale_quality) / 0.3 (contrarian_trend, vol_regime).
-#     The real-data floors (2.0 / 1.0) are unreachable in synthetic data
-#     (p99 vol_oi = 0.78). 0.5 and 0.3 map to the synthetic p95 and p75.
-#   * IQR floor widened from 0.25/0.35 to 3.0 — the model's predicted IQR
-#     on synth data has median 2.15 (fat tails dominate). The real-data
-#     iqr floor blocks 100% of synth trades.
-#   * backtest profit_threshold=0.50, hard_stop_loss=0.04 — see KEY INSIGHT.
-#
-# Per-strategy p_success / p50 floors (unchanged from real-data path):
-#   whale_quality       : p_success>=0.35, p50>=0.001
-#   contrarian_trend    : p_success>=0.35
-#   vol_regime          : low-IV  -> p_success>=0.40
-#                         high-IV -> p_success>=0.35
-# These transfer from the v2_settlement paths; the synthetic distribution
-# is similar enough at the model-output level that they don't need
-# further tuning.
-
-
-def _compute_tier_profitable_tickers() -> set:
-    """Return the Phase A profitable-ticker universe (v1 hardcoded).
-
-    Identified by the per-ticker diagnostic in the previous iteration: these
-    underlyings produced positive PnL across multiple strategies. The
-    remainder of the in-DB ticker list (TSLA, NVDA, AMD, META, MSFT, AMZN,
-    GOOGL, ARKK) was perennially unprofitable.
-
-    NOTE: this is a v1 universe, not data-driven. The next retrain should
-    re-evaluate via walkforward on a rolling 6-month lookback and replace
-    this hardcoded set with a freshly-computed one.
-    """
-    return set(TIER_PROFITABLE_TICKERS)
-
+# (TIER_A_TICKERS and TIER_PROFITABLE_TICKERS moved → backend/models/tier_a.py, see import above)
 
 @router.get("/ml/settings")
 def api_get_settings():
@@ -697,25 +267,7 @@ def api_get_model_runs(limit: int = 50):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ═══════════════════════════════════════════════════════════════
-# DATABASE HELPERS
-# ═══════════════════════════════════════════════════════════════
-
-def _execute_with_retry(func, max_retries=5, initial_delay=0.1):
-    """Execute a database operation with retry logic for SQLite locking."""
-    import time
-    delay = initial_delay
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and attempt < max_retries - 1:
-                time.sleep(delay)
-                delay *= 2  # Exponential backoff
-            else:
-                raise
-    raise sqlite3.OperationalError("Max retries exceeded")
-
+# (_execute_with_retry moved → backend/db/queries.py, see import above)
 
 # ═══════════════════════════════════════════════════════════════
 # TRADE LOGGING
@@ -1445,7 +997,7 @@ def api_train_model():
             for q in QUANTILES
         ]
         try:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=5) as ex:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=_SCYLLA_MAX_PROC) as ex:
                 for q, pipe in ex.map(_fit_one_quantile_train, fit_args):
                     models[q] = pipe
         except Exception as pool_ex:
@@ -1629,75 +1181,7 @@ def api_train_model():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def enforce_monotonic_quantiles(preds: dict) -> dict:
-    """Enforces monotonicity across predictions: P10 <= P25 <= P50 <= P75 <= P90."""
-    keys = ["p10", "p25", "p50", "p75", "p90"]
-    vals = sorted([preds[k] for k in keys])
-    return {k: v for k, v in zip(keys, vals)}
-
-
-def _serialize_cpp_inference_artifacts(models, numeric_features, categorical_features, quantiles):
-    """
-    Persist trained LightGBM quantile Pipelines to backend/cache/cpp_inference/ for
-    the C++ InferenceEngine. Writes:
-      - scylla_q{10,25,50,75,90}.txt  (raw LightGBM text format, loaded by
-        InferenceEngine::load via LGBM_BoosterLoadModelFromFile)
-      - scylla_preprocessor.json      (numeric/categorical feature schema, imputer
-        medians, OHE category maps)
-    Idempotent — overwrites existing files. Safe to call from any path that has a
-    freshly fitted {0.1, 0.25, 0.5, 0.75, 0.9} -> Pipeline dict (training,
-    direct_dev, or walkforward).
-    """
-    import json
-    ARTIFACT_DIR = os.path.join(CACHE_DIR, "cpp_inference")
-    os.makedirs(ARTIFACT_DIR, exist_ok=True)
-    for q, pipe in models.items():
-        booster = pipe.named_steps['regressor'].booster_
-        booster.save_model(os.path.join(ARTIFACT_DIR, f"scylla_q{int(q*100)}.txt"))
-    preprocessor_fit = models[0.5].named_steps['preprocess']
-    num_medians = list(preprocessor_fit.named_transformers_['num']
-                       .named_steps['imputer'].statistics_)
-    ohe_categories = [list(c) for c in preprocessor_fit.named_transformers_['cat']
-                      .named_steps['onehot'].categories_]
-    with open(os.path.join(ARTIFACT_DIR, "scylla_preprocessor.json"), "w") as f:
-        json.dump({
-            "version": 1,
-            "quantiles": quantiles,
-            "numeric_features": numeric_features,
-            "categorical_features": categorical_features,
-            "numeric_medians": num_medians,
-            "ohe_categories": ohe_categories,
-            "model_version_tag": "lightgbm_quantile_v2_no_scaler",
-            "is_synthetic": True,
-        }, f, indent=2)
-
-import hashlib
-import json
-
-def _get_cache_hash(features_dict: dict) -> str:
-    s = json.dumps(features_dict, sort_keys=True)
-    return hashlib.sha256(s.encode('utf-8')).hexdigest()
-
-def _check_prediction_cache(input_hash: str, model_version: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT prediction_json FROM prediction_cache WHERE input_hash = ? AND model_version = ?", (input_hash, model_version))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return json.loads(row[0])
-    return None
-
-def _save_prediction_cache(input_hash: str, model_version: str, prediction_dict: dict):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO prediction_cache (input_hash, model_version, prediction_json, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (input_hash, model_version, json.dumps(prediction_dict), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-    conn.close()
-
+# (enforce_monotonic_quantiles, _cpp_artifacts, prediction cache moved → backend/models/predict.py, backend/models/train.py)
 
 # ═══════════════════════════════════════════════════════════════
 # PREDICTION / INFERENCE
@@ -1925,26 +1409,9 @@ def api_get_stats():
 # BACKTESTER
 # ═══════════════════════════════════════════════════════════════
 
-def get_real_trades(conn, **filters) -> pd.DataFrame:
-    """
-    Shared query helper that pulls options_trades.
-    Default is is_synthetic = 0 (real scanner output). Pass synthetic=True to
-    pull the Black-Scholes–grounded synthetic dataset generated by
-    seed_grounded_real_options.py (used by the Phase A verification script
-    to validate the model + strategy pipeline end-to-end on a known-positive
-    expected-value universe).
-    """
-    synthetic = bool(filters.pop("synthetic", False))
-    query = f"SELECT * FROM options_trades WHERE is_synthetic = {1 if synthetic else 0}"
-    params = []
-    for k, v in filters.items():
-        query += f" AND {k} = ?"
-        params.append(v)
-    query += " ORDER BY timestamp ASC"
-    return pd.read_sql_query(query, conn, params=params)
+# (get_real_trades moved → backend/db/queries.py, see import above)
 
-
-from config._strategy_loader import get_strategy_params, get_common_params
+# (_strategy_loader imported above via try/except block)
 
 
 def _resolve_strategy_defaults(req: "BacktestRequestSchema") -> dict:
@@ -1982,6 +1449,7 @@ def _resolve_strategy_defaults(req: "BacktestRequestSchema") -> dict:
         "max_quantile_spread":        pick("max_quantile_spread", "max_quantile_spread", "strat", 0.0),
         "min_median_return":          pick("min_median_return", "min_median_return", "strat", 0.0),
         "slippage_pct":               pick("slippage_pct", "slippage_pct", "common", 0.01),
+        "use_costs":                  pick("use_costs", "use_costs", "common", True),
         "max_iv":                     pick("max_iv", "max_iv", "strat", 150.0),
     }
 
@@ -2044,130 +1512,11 @@ class BacktestRequestSchema(BaseModel):
     # of real scanner output. Also bypasses the TIER_PROFITABLE_TICKERS gate in the new
     # strategies (synthetic universe is by-construction positive-EV, no need to filter)
     # and uses synthetic-tuned vol_oi floors. Default False preserves prod path.
-    use_synthetic: Optional[bool] = False
+    use_synthetic: Optional[bool] = True
+    use_costs: Optional[bool] = True
 
 
-def _process_walkforward_step(T_start, T_end, df_real, calibration_target_pct=0.025, n_estimators=200, learning_rate=0.025, min_child_samples=15, df_real_feat=None):
-    # Plan 1A: removed the unused `profit_threshold` parameter. The walkforward step
-    # is pure quantile regression — no binary label is computed here. The
-    # `walkforward_label_threshold` field in BacktestRequestSchema is reserved for
-    # a future binary-label refactor and is consumed only by the walkforward
-    # cache key (see api_backtest L2168).
-    from sklearn.pipeline import Pipeline
-    from sklearn.impute import SimpleImputer
-    from sklearn.preprocessing import StandardScaler, OneHotEncoder
-    from sklearn.compose import ColumnTransformer
-
-    if df_real_feat is not None:
-        df_train_feat = df_real_feat.iloc[0:T_start]
-        df_test_feat = df_real_feat.iloc[T_start:T_end]
-    else:
-        df_train = df_real.iloc[0:T_start]
-        df_test = df_real.iloc[T_start:T_end]
-        if len(df_test) == 0:
-            return (T_start, [])
-        df_train_feat = compute_advanced_features(df_train)
-        df_test_feat = compute_advanced_features(df_test)
-
-    if len(df_test_feat) == 0:
-        return (T_start, [])
-    numeric_features = [
-        'strike', 'volume', 'open_interest', 'vol_oi_ratio', 'implied_vol',
-        'underlier_price', 'premium', 'dte',
-        'moneyness', 'iv_hv_ratio', 'vix_level', 'log_premium'
-    ]
-    categorical_features = ['option_type', 'side', 'trend_alignment', 'dte_bucket']
-
-    X_train = df_train_feat[['ticker'] + numeric_features + categorical_features]
-    y_train = df_train_feat['observed_return']
-
-    # PHASE B (PARALLELIZATION_PLAN 6.2): StandardScaler removed for consistency
-    # with the training pipeline in api_train_model. Both paths must agree on
-    # preprocessing, otherwise the walkforward inner models and the outer
-    # production model see differently-scaled features.
-    numeric_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='median')),
-    ])
-    categorical_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='most_frequent')),
-        ('onehot', OneHotEncoder(handle_unknown='ignore'))
-    ])
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', numeric_transformer, numeric_features),
-            ('cat', categorical_transformer, categorical_features)
-        ],
-        remainder='drop'
-    )
-
-    QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
-    models = {}
-    # PARALLELIZATION_PLAN §4.2: fit 5 quantile models in parallel per walkforward step.
-    # The outer joblib uses threads, so inner ProcessPoolExecutor is safe (no process fork clash).
-    # Dynamic bound matches api_train_model (line ~1452): cap at 5 but respect CPU count.
-    wf_fit_args = [
-        (q, X_train, y_train, preprocessor, n_estimators, learning_rate, 20, min_child_samples, 1.0)
-        for q in QUANTILES
-    ]
-    try:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=min(5, os.cpu_count() or 4)) as ex:
-            for q, pipe in ex.map(_fit_one_quantile_train, wf_fit_args):
-                models[q] = pipe
-    except Exception as pool_ex:
-        logger.warning(f"Walkforward ProcessPoolExecutor failed ({pool_ex}), falling back to sequential")
-        models = {}
-        for q in QUANTILES:
-            pipe = Pipeline([
-                ("preprocess", preprocessor),
-                ("regressor", lgb.LGBMRegressor(
-                    objective="quantile",
-                    alpha=q,
-                    n_estimators=n_estimators,
-                    learning_rate=learning_rate,
-                    num_leaves=20,
-                    min_child_samples=min_child_samples,
-                    random_state=42,
-                    verbose=-1,
-                    n_jobs=4
-                ))
-            ])
-            pipe.fit(X_train, y_train)
-            models[q] = pipe
-
-    X_test = df_test_feat[['ticker'] + numeric_features + categorical_features]
-
-    p10_preds = models[0.1].predict(X_test)
-    p25_preds = models[0.25].predict(X_test)
-    p50_preds = models[0.5].predict(X_test)
-    p75_preds = models[0.75].predict(X_test)
-    p90_preds = models[0.9].predict(X_test)
-
-    step_preds = []
-    # Use df_test_feat (always defined in both if/else paths above). df_test is only
-    # assigned in the else branch — referencing it here raised UnboundLocalError after
-    # the df_real_feat pre-compute optimization was added. df_test_feat has the same
-    # original columns as df_test plus the engineered features, so the `row` payload is
-    # a superset of what callers expect.
-    for idx_test, (row_idx, row) in enumerate(df_test_feat.iterrows()):
-        q_preds = {
-            "p10": float(p10_preds[idx_test]),
-            "p25": float(p25_preds[idx_test]),
-            "p50": float(p50_preds[idx_test]),
-            "p75": float(p75_preds[idx_test]),
-            "p90": float(p90_preds[idx_test])
-        }
-        q_preds = enforce_monotonic_quantiles(q_preds)
-        p_success = compute_calibrated_p_success(
-            calibration_target_pct,
-            q_preds["p10"], q_preds["p25"], q_preds["p50"], q_preds["p75"], q_preds["p90"]
-        )
-        step_preds.append({
-            "row": row,
-            "quantiles": q_preds,
-            "p_success": p_success
-        })
-
-    return (T_start, step_preds)
+# (_process_walkforward_step moved → backend/backtest/walkforward.py, see import above)
 
 
 @router.post("/ml/backtest")
@@ -2193,13 +1542,22 @@ def api_backtest(req: BacktestRequestSchema):
     resolved = _resolve_strategy_defaults(req)
 
     # Check response cache — include ALL strategy-discriminating params to avoid cross-strategy cache collisions
+    try:
+        _ens_conn = sqlite3.connect(DB_PATH)
+        _ens_cur = _ens_conn.cursor()
+        _ens_cur.execute("SELECT COUNT(DISTINCT ensemble_id) FROM options_trades WHERE is_synthetic = 1")
+        _ens_count = _ens_cur.fetchone()[0]
+        _ens_conn.close()
+    except Exception:
+        _ens_count = 0
     cache_key_resp = (
         f"{req.mode}_{resolved['initial_capital']}_{resolved['prob_threshold']}_{resolved['kelly_multiplier']}_"
         f"{resolved['kelly_cap']}_{resolved['stop_lambda']}_{resolved['max_risk_pct_per_trade']}_{resolved['walkforward_train_window']}_"
         f"{resolved['walkforward_test_increment']}_{req.strategy_type}_{resolved['max_concurrent_trades']}_"
         f"{resolved['scan_time']}_{resolved['min_kelly_fraction']}_{resolved['hard_stop_loss']}_{resolved['lookback_days']}_"
         f"{resolved['profit_threshold']}_{req.calibration_target_pct}_{resolved['max_quantile_spread']}_{resolved['min_median_return']}_{resolved['slippage_pct']}_{resolved['max_iv']}_{req.min_open_interest}"
-        f"_{req.min_dte}_{req.max_dte}_{req.data_start_idx}_{req.data_end_idx}_{int(bool(req.use_synthetic))}"
+        f"_{req.min_dte}_{req.max_dte}_{req.data_start_idx}_{req.data_end_idx}_{int(bool(req.use_synthetic))}_{int(bool(req.use_costs))}"
+        f"_{_ens_count}"
     )
     if cache_key_resp in _backtest_response_cache:
         print(f"api_backtest: returning cached response for key {cache_key_resp}")
@@ -2307,18 +1665,47 @@ def api_backtest(req: BacktestRequestSchema):
                         tasks.append((T, test_end))
                     T += increment
 
-                print(f"Parallelizing {len(tasks)} walkforward steps across CPU cores...")
-                # 5 outer × 5 inner quantile workers = 25 cores target; matches training (line ~1452).
-                num_workers = min(5, os.cpu_count() or 4)
+                num_workers = min(_SCYLLA_MAX_PROC, os.cpu_count() or 4)
                 df_real_feat = compute_advanced_features(df_real)
-                results = joblib.Parallel(n_jobs=num_workers, prefer="threads")(
-                    joblib.delayed(_process_walkforward_step)(T_start, T_end, df_real, calibration_target_pct, df_real_feat=df_real_feat)
-                    for T_start, T_end in tasks
-                )
+                print(f"Walkforward: {len(tasks)} steps across {num_workers} workers "
+                      f"(train_window={train_window}, increment={increment}, "
+                      f"{N} rows × {len(df_real_feat.columns)} cols, "
+                      f"~{df_real_feat.memory_usage(deep=True).sum() / 1024**2:.0f} MB)")
+
+                # PARALLELIZATION_PLAN §4: ONE shared ProcessPoolExecutor
+                # instead of spawning/destroying child pools inside every
+                # _process_walkforward_step. The initializer pickles the
+                # full dataset into each worker ONCE (not once per task),
+                # then each worker fits all 5 quantile models sequentially.
+                #
+                # Sibling-worker limit = min(_SCYLLA_MAX_PROC, cpu_count).
+                # This replaces the old outer-joblib-threads + inner-pool
+                # pattern that attempted 16,955+ rapid process spawns and
+                # caused WinError 1450 on Windows.
+                _results = []
+                with concurrent.futures.ProcessPoolExecutor(
+                    max_workers=num_workers,
+                    initializer=_wf_worker_init,
+                    initargs=(df_real, df_real_feat)
+                ) as executor:
+                    _futures = {
+                        executor.submit(_process_walkforward_step, T_start, T_end): (T_start, T_end)
+                        for T_start, T_end in tasks
+                    }
+                    for fut in concurrent.futures.as_completed(_futures):
+                        try:
+                            _results.append(fut.result())
+                        except Exception as _exc:
+                            T_start, T_end = _futures[fut]
+                            logger.error(
+                                f"Walkforward step [{T_start}:{T_end}] failed: {_exc}"
+                            )
+                            # Continue with other steps — one bad window
+                            # shouldn't kill the whole backtest.
 
                 # Sort by T_start to preserve exact chronological order
-                results.sort(key=lambda r: r[0])
-                for _, step_preds in results:
+                _results.sort(key=lambda r: r[0])
+                for _, step_preds in _results:
                     predictions.extend(step_preds)
 
             if not predictions_loaded:
@@ -2769,6 +2156,12 @@ def api_backtest(req: BacktestRequestSchema):
                 observed_return = float(row['observed_return']) if row['observed_return'] is not None else 0.0
                 max_adverse_return = float(row['max_adverse_return']) if row['max_adverse_return'] is not None else 0.0
 
+                if req.use_costs and row.get('commission_per_contract') is not None and row.get('premium') and row['premium'] > 0:
+                    cost_dollars = 2.0 * float(row['commission_per_contract'])
+                    entry_dollars = float(row['premium']) * 100.0
+                    cost_pct = cost_dollars / entry_dollars
+                    observed_return = observed_return - cost_pct
+
                 if max_adverse_return <= -effective_stop:
                     exit_reason = "stop_hit"
                     trade_return = -effective_stop
@@ -2954,14 +2347,7 @@ def api_backtest(req: BacktestRequestSchema):
     return res_payload
 
 
-BOOT_CACHE_PATH = os.path.join(CACHE_DIR, "boot_backtest_cache.pkl")
-
-SWEEP_OPTIMAL_PATHS = [
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts", "sweep_optimal.json"),
-    os.path.join(CACHE_DIR, "sweep_optimal_v2.json"),  # CHANGELOG: 2026-07-28 v2 sweep output
-    os.path.join(CACHE_DIR, "sweep_optimal.json"),
-]
-
+# (BOOT_CACHE_PATH, SWEEP_OPTIMAL_PATHS → backend/config/constants.py, see import above)
 
 def _read_sweep_optimal():
     for p in SWEEP_OPTIMAL_PATHS:
@@ -2994,12 +2380,7 @@ def api_get_optimal_params():
     }
 
 
-STRATEGY_DEFAULTS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "config",
-    "strategy_defaults.json"
-)
-
+# (STRATEGY_DEFAULTS_PATH → backend/config/constants.py, see import above)
 
 @router.get("/ml/strategy-defaults")
 def api_get_strategy_defaults():
@@ -3037,39 +2418,7 @@ def api_get_dataset_info(use_synthetic: bool = True):
     No row payload — just aggregates.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            flag = 1 if use_synthetic else 0
-            row = conn.execute(
-                "SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM options_trades WHERE is_synthetic = ?",
-                (flag,),
-            ).fetchone()
-        finally:
-            conn.close()
-        if not row or row[0] is None or row[1] is None:
-            return {
-                "data_start": None,
-                "data_end": None,
-                "data_span_days": 0,
-                "data_count": 0,
-                "is_synthetic_filter": bool(use_synthetic),
-            }
-        ts_min_str, ts_max_str, count = row[0], row[1], int(row[2])
-        data_start = ts_min_str[:10] if len(ts_min_str) >= 10 else ts_min_str
-        data_end = ts_max_str[:10] if len(ts_max_str) >= 10 else ts_max_str
-        try:
-            d_min = datetime.datetime.strptime(data_start, "%Y-%m-%d").date()
-            d_max = datetime.datetime.strptime(data_end, "%Y-%m-%d").date()
-            data_span_days = (d_max - d_min).days
-        except Exception:
-            data_span_days = 0
-        return {
-            "data_start": data_start,
-            "data_end": data_end,
-            "data_span_days": int(data_span_days),
-            "data_count": count,
-            "is_synthetic_filter": bool(use_synthetic),
-        }
+        return get_dataset_stats(use_synthetic=use_synthetic)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -23,8 +23,17 @@ import json
 import time
 import random
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
+
+_SCYLLA_MAX_PROC = max(1, int(os.environ.get("SCYLLA_MAX_WORKERS", "2")))
+import concurrent.futures
+_OrigPPE = concurrent.futures.ProcessPoolExecutor
+class _CappedPPE(_OrigPPE):
+    def __init__(self, *args, **kwargs):
+        kwargs["max_workers"] = _SCYLLA_MAX_PROC
+        super().__init__(*args, **kwargs)
+concurrent.futures.ProcessPoolExecutor = _CappedPPE
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Add backend to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
@@ -148,7 +157,8 @@ def run_backtest_wrapper(params_dict):
             max_dte=60,
             data_start_idx=0,
             data_end_idx=DATA_SUBSET_SIZE,
-            use_synthetic=False,
+            use_synthetic=True,
+            use_costs=True,
         )
         
         result = api_backtest(req)
@@ -269,7 +279,7 @@ def main():
     print(f"Walkforward: train=500, test_increment=100, label_threshold=0.5")
     
     # Determine worker count (leave 2 cores free for system)
-    max_workers = max(1, min(mp.cpu_count() - 2, 5))  # Cap at 5 workers
+    max_workers = 1  # serial sweep, paging-safe on laptops; tune via SCYLLA_MAX_WORKERS for inner pools
     print(f"Using {max_workers} parallel workers (CPU count: {mp.cpu_count()})")
     
     all_optimal = {}
@@ -280,7 +290,7 @@ def main():
         print(f"{'#'*60}")
         
         # Stage 1: Coarse random sampling (30 combos)
-        coarse_params = sample_random_params(strategy_name, n_samples=30)
+        coarse_params = sample_random_params(strategy_name, n_samples=15)
         coarse_results = run_sweep_stage(strategy_name, coarse_params, stage="coarse", max_workers=max_workers)
         
         # Get top 3 for refinement
@@ -294,7 +304,7 @@ def main():
         # Stage 2: Refinement around top performers (15 combos each)
         refined_params = []
         for top_result in top_3:
-            refined = sample_refined_params(top_result["params"], n_samples=15)
+            refined = sample_refined_params(top_result["params"], n_samples=8)
             refined_params.extend(refined)
         
         if refined_params:
