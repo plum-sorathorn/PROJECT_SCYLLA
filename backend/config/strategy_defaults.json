@@ -2,13 +2,13 @@
   "_comment": "Consolidated default parameters for all strategies. Single source of truth — frontend, backend, and HTML defaults must all reference this file (or its API). Update one place, propagate everywhere.",
   "_updated": "2026-07-29",
   "_sweep_source": "scripts/sweep_strategies_v2.py",
-  "_sweep_dataset": "synthetic-only (is_synthetic=1, 5 ensembles), walkforward 500/100, use_costs=True, cost-adjusted P&L",
+  "_sweep_dataset": "synthetic-only (is_synthetic=1, 5 ensembles), walkforward 500/500, use_costs=True, cost-adjusted P&L",
   "_notes": "Values calibrated by v2 sweep on synthetic dataset. Realistic options-trading ranges: profit_threshold 15-50%, hard_stop_loss 15-40%, kelly_cap 5-20%. Values outside those ranges are bugs.",
 
   "common": {
     "initial_capital": 100000.0,
     "walkforward_train_window": 500,
-    "walkforward_test_increment": 100,
+    "walkforward_test_increment": 500,
     "min_kelly_fraction": 0.01,
     "slippage_pct": 0.01,
     "lookback_days": null,

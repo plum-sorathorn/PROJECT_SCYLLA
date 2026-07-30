@@ -1480,7 +1480,7 @@ class BacktestRequestSchema(BaseModel):
     stop_lambda: Optional[float] = None
     max_risk_pct_per_trade: Optional[float] = None
     walkforward_train_window: Optional[int] = None
-    walkforward_test_increment: Optional[int] = None  # PHASE A: 250 = synthetic-tuned optimal (recycle bin cache v2_settlement_500_250_68802_0.5_0.025_0_None.pkl). 100 is too slow on 68k trades (~683 steps, 15-30 min).
+    walkforward_test_increment: Optional[int] = None  # Default 500 from strategy_defaults.json. 339k rows with increment=500 → ~678 steps (~2h cold). 250 → 1356 steps. Paired with train_window=500.
     confirm_direct_dev: Optional[bool] = False
     strategy_type: Optional[str] = "whale_quality"  # PHASE A: default to new strategy
     max_concurrent_trades: Optional[int] = None  # PHASE A: was 8 — allow more concurrent (with tighter Kelly)
