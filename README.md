@@ -1,3 +1,5 @@
+<div align="center">
+
 # PROJECT SCYLLA // Quantitative Options Terminal
 
 **High-Performance Hybrid Quantitative Terminal, Institutional Whale Scanner & ML Backtesting Engine**
@@ -51,28 +53,28 @@ graph TD
 
 ## Core Features
 
-### 🐋 Institutional Whale Scanner
+### Institutional Whale Scanner
 - Real-time anomaly detection identifying options volume surging beyond $\ge 5\times$ Open Interest.
 - Automatic classification of aggressive directional order flow, premium size tiering, and contract expiration concentration.
 - Cross-references whale activity against underlying technical moving averages (50-day / 200-day SMA).
 
-### ⚡ Embedded LightGBM Inference Engine
+### Embedded LightGBM Inference Engine
 - Native C++ LightGBM C-API integration for sub-millisecond classification.
 - Predicts directional trade regimes: `VOL_EXPANSION`, `SIDEWAYS`, `BULLISH_BREAKOUT`, and `BEARISH_BREAKDOWN`.
 - Automatic transparent fallback to Python LightGBM if C++ runtime is offline.
 
-### 📉 Volatility Surface & IV Skew Sandbox
+### Volatility Surface & IV Skew Sandbox
 - Dynamic IV Rank and IV Percentile tracking across monitored equities and benchmark indices.
 - Strike-by-strike implied volatility smile curves across out-of-the-money puts and calls.
 - 30-day historical Put/Call ratio tracking for market sentiment proxies (`SPY`, `QQQ`, `IWM`).
 - At-the-money straddle expected move calculator ($\pm \$$ expected market dispersion).
 
-### 📊 Walk-Forward Quantitative Backtester
+### Walk-Forward Quantitative Backtester
 - Robust out-of-sample walk-forward simulation engine with strict chronological temporal separation to eliminate lookahead bias.
 - Full performance telemetry: **Sharpe Ratio**, **Sortino Ratio**, **Calmar Ratio**, **Max Drawdown**, **Win Rate**, and **Kelly Fraction Sizing**.
 - Hyperparameter grid sweeps producing Pareto-optimal profit-taking and stop-loss boundaries.
 
-### 🛡️ Zero-Cost Resilient Data Pipeline
+### Zero-Cost Resilient Data Pipeline
 - Zero paid API keys or recurring data fees required.
 - Custom `_yf_safe` networking layer featuring exponential backoff, jittered retry scheduling, and circuit breaker patterns to guarantee continuous uptime over public market feeds.
 
