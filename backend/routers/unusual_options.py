@@ -11,6 +11,8 @@ import numpy as np
 import yfinance as yf
 import logging
 
+from ._yf_safe import safe_call, _staggered_submit
+
 logger = logging.getLogger("scylla.unusual_options")
 
 router = APIRouter()
@@ -28,14 +30,14 @@ SCAN_TICKERS = [
 def fetch_option_chain(ticker: str) -> pd.DataFrame:
     """Fetch full option chain for a ticker via yfinance."""
     try:
-        tk = yf.Ticker(ticker)
-        expirations = tk.options
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        expirations = safe_call(lambda t: list(t.options) if t.options else [], tk)
         if not expirations:
             return pd.DataFrame()
 
-        spot = tk.fast_info.get("lastPrice", None)
+        spot = safe_call(lambda t: t.fast_info.get("lastPrice"), tk)
         if spot is None or spot == 0:
-            hist = tk.history(period="1d")
+            hist = safe_call(lambda t: t.history(period="1d"), tk)
             spot = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
 
         # Target expirations between 0 and 90 Days to Expiration (DTE), capping at a maximum of 6
@@ -64,7 +66,7 @@ def fetch_option_chain(ticker: str) -> pd.DataFrame:
         frames = []
         for exp in selected_exps:
             try:
-                chain = tk.option_chain(exp)
+                chain = safe_call(lambda t, e: t.option_chain(e), tk, exp)
                 calls = chain.calls.copy()
                 puts = chain.puts.copy()
                 calls["optionType"] = "Call"
@@ -90,7 +92,8 @@ def fetch_option_chain(ticker: str) -> pd.DataFrame:
 def compute_sma_flags(ticker: str) -> dict:
     """Compute 50d and 200d SMA alignment flags."""
     try:
-        hist = yf.Ticker(ticker).history(period="1y")
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        hist = safe_call(lambda t: t.history(period="1y"), tk)
         if hist.empty or len(hist) < 50:
             return {"above50dSMA": None, "above200dSMA": None}
         close = hist["Close"]
@@ -105,37 +108,51 @@ def compute_sma_flags(ticker: str) -> dict:
         return {"above50dSMA": None, "above200dSMA": None}
 
 
+from .utils import _sanitize_float_values
+
+
 def compute_expected_move(ticker: str) -> "float | None":
     """ATM straddle price = call_price + put_price for front-month near ATM."""
     try:
-        tk = yf.Ticker(ticker)
-        spot = tk.fast_info.get("lastPrice", 0.0)
-        expirations = tk.options
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        spot = safe_call(lambda t: t.fast_info.get("lastPrice", 0.0), tk)
+        expirations = safe_call(lambda t: list(t.options) if t.options else [], tk)
         if not expirations or spot == 0:
-            return None
+            return 0.0
 
         exp = expirations[0]
-        chain = tk.option_chain(exp)
+        chain = safe_call(lambda t, e: t.option_chain(e), tk, exp)
         calls = chain.calls
         puts = chain.puts
 
         # Find ATM strike
         atm_strike = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]["strike"].values
         if len(atm_strike) == 0:
-            return None
+            return 0.0
         atm = atm_strike[0]
 
         call_row = calls[calls["strike"] == atm]
         put_row = puts[puts["strike"] == atm]
         if call_row.empty or put_row.empty:
-            return None
+            return 0.0
 
-        call_mid = (call_row["bid"].values[0] + call_row["ask"].values[0]) / 2
-        put_mid = (put_row["bid"].values[0] + put_row["ask"].values[0]) / 2
+        call_bid = call_row["bid"].values[0]
+        call_ask = call_row["ask"].values[0]
+        put_bid = put_row["bid"].values[0]
+        put_ask = put_row["ask"].values[0]
+
+        if pd.isna(call_bid) or pd.isna(call_ask) or pd.isna(put_bid) or pd.isna(put_ask):
+            return 0.0
+
+        call_mid = (call_bid + call_ask) / 2
+        put_mid = (put_bid + put_ask) / 2
         straddle = call_mid + put_mid
-        return round(straddle, 2)
+        if pd.isna(straddle) or math.isnan(straddle) or math.isinf(straddle):
+            return 0.0
+
+        return round(float(straddle), 2)
     except Exception:
-        return None
+        return 0.0
 
 
 import time
@@ -143,6 +160,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _SCANNER_CACHE = {}
 _CACHE_TTL_SECONDS = 180  # 3 minutes cache TTL
+
+_CHAIN_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_CHAIN_TTL_SECONDS = 60
 
 
 def _process_single_ticker(ticker: str, min_vol_oi: float) -> list[dict]:
@@ -283,19 +303,36 @@ def scan_raw_options(tickers: str, min_vol_oi: float, limit: int) -> list[dict]:
     if not ticker_list:
         return []
 
+    # Two-tier cache: serve fresh per-ticker rows from _CHAIN_CACHE, fetch only the
+    # uncached remainder from yfinance. Lowered to 6 workers + staggered submit to
+    # avoid triggering Yahoo's burst rate-limiter (single 'exchangeTimezoneName'
+    # KeyError storms were the dominant failure mode at 20 workers).
+    uncached = []
     all_rows = []
-    # Fetch option chains in parallel across max 10 worker threads
-    workers = min(10, len(ticker_list))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_process_single_ticker, ticker, min_vol_oi): ticker for ticker in ticker_list}
-        for future in as_completed(futures):
-            try:
-                res = future.result()
-                if res:
-                    all_rows.extend(res)
-            except Exception as e:
+    for t in ticker_list:
+        entry = _CHAIN_CACHE.get(t)
+        if entry is not None and (now - entry[0]) < _CHAIN_TTL_SECONDS:
+            all_rows.extend(entry[1])
+        else:
+            uncached.append(t)
+
+    if uncached:
+        workers = min(6, len(uncached))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {}
+            for ticker in uncached:
+                fut = _staggered_submit(executor, _process_single_ticker, ticker, min_vol_oi)
+                futures[fut] = ticker
+            for future in as_completed(futures):
                 t_name = futures[future]
-                logger.warning(f"Failed parallel scan for ticker {t_name}: {e}")
+                try:
+                    res = future.result()
+                    if res:
+                        all_rows.extend(res)
+                    _CHAIN_CACHE[t_name] = (time.time(), res if isinstance(res, list) else [])
+                except Exception as e:
+                    logger.warning(f"Failed parallel scan for ticker {t_name}: {e}")
+                    _CHAIN_CACHE.pop(t_name, None)
 
     all_rows.sort(key=lambda x: x["volOiRatio"], reverse=True)
     results = all_rows[:limit]
@@ -347,9 +384,20 @@ def get_scanner(
         is_whale = r["volOiRatio"] >= 5.0
         normalized_vol_oi = round(math.log1p(r["volOiRatio"]), 4)
 
-        expected_move = r["expectedMove"] or 0.0
-        expected_move_upper = round(r["underlierPrice"] + expected_move, 2)
-        expected_move_lower = round(r["underlierPrice"] - expected_move, 2)
+        em_val = r.get("expectedMove")
+        if em_val is None or pd.isna(em_val) or (isinstance(em_val, float) and (math.isnan(em_val) or math.isinf(em_val))):
+            expected_move = 0.0
+        else:
+            expected_move = float(em_val)
+
+        u_price_val = r.get("underlierPrice", 0.0)
+        if u_price_val is None or pd.isna(u_price_val) or (isinstance(u_price_val, float) and (math.isnan(u_price_val) or math.isinf(u_price_val))):
+            u_price = 0.0
+        else:
+            u_price = float(u_price_val)
+
+        expected_move_upper = round(u_price + expected_move, 2)
+        expected_move_lower = round(u_price - expected_move, 2)
 
         above50_val = 1 if r["above50dSMA"] is True else (0 if r["above50dSMA"] is False else -1)
         above200_val = 1 if r["above200dSMA"] is True else (0 if r["above200dSMA"] is False else -1)
@@ -394,10 +442,12 @@ def get_scanner(
             "isWeekly": r["isWeekly"],
         })
 
-        # Summary computations
-        ratio = r["volOiRatio"]
-        sum_ratio += ratio
-        max_ratio = max(max_ratio, ratio)
+    ratio_list = [r["volOiRatio"] for r in raw_data if r.get("volOiRatio") is not None and pd.notna(r["volOiRatio"])]
+    sum_ratio = sum(ratio_list)
+    max_ratio = max(ratio_list) if ratio_list else 0.0
+
+    for r in raw_data:
+        is_whale = r["volOiRatio"] >= 5.0
         if r["optionType"] == "Call":
             call_vol += r["volume"]
         else:
@@ -443,8 +493,8 @@ def get_scanner(
         except Exception as e:
             logger.warning(f"Failed to enqueue trade logging: {e}")
 
-    return {
+    return _sanitize_float_values({
         "data": processed,
         "summary": summary,
         "count": len(processed)
-    }
+    })

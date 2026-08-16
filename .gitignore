@@ -114,3 +114,7 @@ dist/
 *~
 *.bak
 *.tmp
+
+/.opencode
+/backend/cache
+!backend/cache/sweep_optimal_v2.json

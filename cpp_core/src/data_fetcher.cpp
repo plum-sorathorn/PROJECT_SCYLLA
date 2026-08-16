@@ -11,6 +11,7 @@
 #include <vector>
 #include <stdexcept>
 #include <iostream>
+#include <mutex>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -18,22 +19,44 @@ using json = nlohmann::json;
 
 namespace scylla {
 
-// --- Low-level WinHTTP GET helper ---
-static std::string httpGet(const std::wstring& host, const std::wstring& path, INTERNET_PORT port = 6900) {
-    HINTERNET hSession = WinHttpOpen(L"ScyllaCore/1.0",
+// --- Persistent WinHTTP session + connect to 127.0.0.1:6900 ---
+// Avoid TCP handshake on every C++→Python hop.
+// Crow handlers may invoke httpGet concurrently from multiple threads, so guard with a mutex.
+namespace {
+HINTERNET g_hSession = nullptr;
+HINTERNET g_hConnect = nullptr;
+std::mutex g_httpMutex;
+
+void ensureHttpConnection() {
+    if (g_hSession && g_hConnect) return;
+    if (g_hSession) { WinHttpCloseHandle(g_hSession); g_hSession = nullptr; }
+    g_hSession = WinHttpOpen(L"ScyllaCore/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) throw std::runtime_error("WinHttpOpen failed");
+    if (!g_hSession) throw std::runtime_error("WinHttpOpen failed");
+    g_hConnect = WinHttpConnect(g_hSession, L"127.0.0.1", 6900, 0);
+    if (!g_hConnect) {
+        WinHttpCloseHandle(g_hSession);
+        g_hSession = nullptr;
+        throw std::runtime_error("WinHttpConnect failed");
+    }
+}
+} // namespace
 
-    HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), port, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); throw std::runtime_error("WinHttpConnect failed"); }
+// --- Low-level WinHTTP GET helper ---
+// host/port signature is preserved for call-site compatibility, but only 127.0.0.1:6900 is supported
+// with the persistent connection. Other targets throw.
+static std::string httpGet(const std::wstring& host, const std::wstring& path, INTERNET_PORT port = 6900) {
+    if (host != L"127.0.0.1" || port != 6900) {
+        throw std::runtime_error("httpGet: only 127.0.0.1:6900 is supported with the persistent connection");
+    }
+    std::lock_guard<std::mutex> lock(g_httpMutex);
+    ensureHttpConnection();
 
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(),
+    HINTERNET hRequest = WinHttpOpenRequest(g_hConnect, L"GET", path.c_str(),
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (!hRequest) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
         throw std::runtime_error("WinHttpOpenRequest failed");
     }
 
@@ -41,8 +64,6 @@ static std::string httpGet(const std::wstring& host, const std::wstring& path, I
         WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     if (!bResult || !WinHttpReceiveResponse(hRequest, NULL)) {
         WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
         throw std::runtime_error("HTTP request failed");
     }
 
@@ -59,8 +80,6 @@ static std::string httpGet(const std::wstring& host, const std::wstring& path, I
     } while (dwSize > 0);
 
     WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
     return response;
 }
 
@@ -168,6 +187,15 @@ IVSandboxResult fetchIVSkew(const std::string& ticker) {
         res.smileData.push_back(sp);
     }
     return res;
+}
+
+std::string fetchTacticalBundle(double minVolOI, const std::string& volconTicker, const std::string& ivTicker) {
+    std::wstring wVolcon(volconTicker.begin(), volconTicker.end());
+    std::wstring wIv(ivTicker.begin(), ivTicker.end());
+    std::wstring path = L"/api/v1/tactical-bundle?min_vol_oi=" + std::to_wstring(minVolOI)
+                      + L"&volcon_ticker=" + wVolcon
+                      + L"&iv_ticker=" + wIv;
+    return httpGet(L"127.0.0.1", path);
 }
 
 } // namespace scylla

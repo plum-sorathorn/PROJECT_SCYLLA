@@ -1,0 +1,71 @@
+{
+  "_comment": "Consolidated default parameters for all strategies. Single source of truth — frontend, backend, and HTML defaults must all reference this file (or its API). Update one place, propagate everywhere.",
+  "_updated": "2026-07-29",
+  "_sweep_source": "scripts/sweep_strategies_v2.py",
+  "_sweep_dataset": "synthetic-only (is_synthetic=1, 5 ensembles), walkforward 500/500, use_costs=True, cost-adjusted P&L",
+  "_notes": "Values calibrated by v2 sweep on synthetic dataset. Realistic options-trading ranges: profit_threshold 15-50%, hard_stop_loss 15-40%, kelly_cap 5-20%. Values outside those ranges are bugs.",
+
+  "common": {
+    "initial_capital": 100000.0,
+    "walkforward_train_window": 500,
+    "walkforward_test_increment": 500,
+    "min_kelly_fraction": 0.01,
+    "slippage_pct": 0.01,
+    "lookback_days": null,
+    "min_open_interest": 100,
+    "scan_time": "10:00:00",
+    "max_risk_pct_per_trade": 0.02,
+    "use_costs": true
+  },
+
+  "strategies": {
+    "whale_quality": {
+      "strategy_type": "whale_quality",
+      "prob_threshold": 0.364,
+      "kelly_multiplier": 0.781,
+      "kelly_cap": 0.12,
+      "hard_stop_loss": 0.197,
+      "stop_lambda": 1.5,
+      "max_quantile_spread": 0.132,
+      "real_vol_oi_floor": 2.0,
+      "synth_vol_oi_floor": 5.0,
+      "synth_max_quantile_spread": 0.132,
+      "min_median_return": 0.025,
+      "max_iv": 84.449,
+      "max_concurrent_trades": 10,
+      "profit_threshold": 0.404
+    },
+    "contrarian_trend": {
+      "strategy_type": "contrarian_trend",
+      "prob_threshold": 0.496,
+      "kelly_multiplier": 0.92,
+      "kelly_cap": 0.187,
+      "hard_stop_loss": 0.265,
+      "stop_lambda": 1.5,
+      "max_quantile_spread": 0.0,
+      "real_vol_oi_floor": 1.0,
+      "synth_vol_oi_floor": 1.0,
+      "synth_max_quantile_spread": 0.0,
+      "min_median_return": 0.0,
+      "max_iv": 117.116,
+      "max_concurrent_trades": 9,
+      "profit_threshold": 0.486
+    },
+    "vol_regime": {
+      "strategy_type": "vol_regime",
+      "prob_threshold": 0.363,
+      "kelly_multiplier": 0.644,
+      "kelly_cap": 0.173,
+      "hard_stop_loss": 0.395,
+      "stop_lambda": 1.5,
+      "max_quantile_spread": 0.143,
+      "real_vol_oi_floor": 1.0,
+      "synth_vol_oi_floor": 1.0,
+      "synth_max_quantile_spread": 0.143,
+      "min_median_return": 0.0,
+      "max_iv": 86.723,
+      "max_concurrent_trades": 5,
+      "profit_threshold": 0.386
+    }
+  }
+}

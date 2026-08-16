@@ -9,6 +9,8 @@ import yfinance as yf
 import numpy as np
 import logging
 
+from ._yf_safe import safe_call
+
 logger = logging.getLogger("scylla.technicals")
 router = APIRouter()
 
@@ -23,7 +25,8 @@ def get_technicals(
 
     for ticker in ticker_list:
         try:
-            hist = yf.Ticker(ticker).history(period="1y")
+            tk = safe_call(yf.Ticker, ticker, retries=1)
+            hist = safe_call(lambda t: t.history(period="1y"), tk)
             if hist.empty or len(hist) < 50:
                 continue
             close = hist["Close"]

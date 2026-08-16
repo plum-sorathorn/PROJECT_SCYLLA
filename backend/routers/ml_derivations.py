@@ -56,16 +56,33 @@ def classify_strategy(median: float, p10: float, p90: float, iqr_threshold: floa
 
 def kelly_fraction(p_success: float, median: float, p10: float, p90: float, kelly_cap: float = 0.25) -> tuple[float, float]:
     """
-    Compute Kelly criterion position sizing fraction.
+    Compute Kelly criterion position sizing fraction based on quantile-implied payoff.
     Returns: (capped_fraction, uncapped_fraction)
     """
     denom = max(median - p10, 1e-6)
     numer = max(p90 - median, 1e-6)
     b = max(numer / denom, 0.01)  # asymmetric payoff ratio proxy bounded >= 0.01
-    
+
     # Kelly Formula: f* = (p * b - (1 - p)) / b
     f_star = (p_success * b - (1.0 - p_success)) / b
-    
+
+    capped = max(0.0, min(f_star, kelly_cap))
+    return float(capped), float(f_star)
+
+
+def kelly_fraction_realized(p_success: float, profit_cap: float, stop_loss: float, kelly_cap: float = 0.25) -> tuple[float, float]:
+    """
+    Kelly sizing on the ACTUAL realized payoff structure of the backtest (profit cap / hard stop),
+    not on quantile-implied tails. This avoids over-sizing when the cap clips the model's predicted
+    upside. Use this in the backtest loop where the payoff structure is known.
+
+    Kelly formula: f* = (p * b - (1 - p)) / b, where b = upside / downside.
+    """
+    upside = max(float(profit_cap), 0.01)
+    downside = max(float(stop_loss), 0.01)
+    b = upside / downside
+
+    f_star = (p_success * b - (1.0 - p_success)) / b
     capped = max(0.0, min(f_star, kelly_cap))
     return float(capped), float(f_star)
 

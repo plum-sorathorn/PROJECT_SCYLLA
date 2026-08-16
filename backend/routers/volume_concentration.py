@@ -8,6 +8,8 @@ import yfinance as yf
 import pandas as pd
 import logging
 
+from ._yf_safe import safe_call
+
 logger = logging.getLogger("scylla.volume_concentration")
 router = APIRouter()
 
@@ -19,13 +21,14 @@ def get_volume_concentration(
 ):
     """Returns aggregated option volume by expiration, split by Call and Put."""
     try:
-        tk = yf.Ticker(ticker)
-        expirations = tk.options[:max_expiries]
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        all_exps = safe_call(lambda t: list(t.options) if t.options else [], tk)
+        expirations = all_exps[:max_expiries]
         rows = []
 
         for exp in expirations:
             try:
-                chain = tk.option_chain(exp)
+                chain = safe_call(lambda t, e: t.option_chain(e), tk, exp)
                 call_vol = int(chain.calls["volume"].fillna(0).sum())
                 put_vol = int(chain.puts["volume"].fillna(0).sum())
                 rows.append({

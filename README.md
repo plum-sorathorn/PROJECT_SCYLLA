@@ -33,13 +33,11 @@
 ```
 
 ## Features
-- 🐳 **Whale Scanner** — EOD unusual options vol/OI ≥5x glow neon blue
-- 📈 **Put/Call Ratio Tracker** — SPY/QQQ/IWM 30-day trend
-- 📊 **Volume Concentration** — Stacked bar by expiration cycle
-- 🔥 **IV Sandbox & Skew** — IV Rank, Percentile, Volatility Smile
-- ⚡ **Swing Alignment** — 50d/200d SMA trend flags on whale tickers
-- 🎯 **Expected Move** — ATM straddle ±$ range calculator
+- **Whale Scanner** — EOD unusual options vol/OI ≥5x glow neon blue
+- **Put/Call Ratio Tracker** — SPY/QQQ/IWM 30-day trend
+- **Volume Concentration** — Stacked bar by expiration cycle
+- **IV Sandbox & Skew** — IV Rank, Percentile, Volatility Smile
+- **Swing Alignment** — 50d/200d SMA trend flags on whale tickers
+- **Expected Move** — ATM straddle ±$ range calculator
 
 **No paid API keys required.** All data via free yfinance + OpenBB ODP.
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full setup instructions.
