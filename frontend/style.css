@@ -23,19 +23,24 @@
   /* Accent Colors */
   --color-accent:            #005566;       /* Deep teal active/highlight accent */
   --color-accent-hover:      #004452;       /* Darker teal for button/CTA hover */
-  
+
   /* Status Colors */
   --color-profit:            #2d7a4a;       /* Muted emerald green */
   --bg-profit:               #e8f5e9;       /* Pale mint background */
-  
+
   --color-loss:              #8b3a3a;       /* Muted ruby red */
   --bg-loss:                 #ffebee;       /* Pale rose background */
-  
+
   --color-warning:           #ffb700;       /* Muted amber warning */
   --bg-warning:              #fff3cd;       /* Pale amber background */
-  
+
   --color-alert:             #c62828;       /* Deep red system critical alert */
   --bg-alert:                #ffebee;       /* Pale red alert background */
+
+  /* Semantic aliases — used by inline styles in app.js / index.html */
+  --accent:                  var(--color-accent);
+  --call:                    var(--color-profit);
+  --put:                     var(--color-loss);
 
   /* Borders & Dividers */
   --border-default:          0.5px solid #e0e0e0; /* Default hairline border */
@@ -1084,10 +1089,13 @@ input.dashboard-filter {
 }
 
 /* ── Backtester Custom Elements ─────────────────────────── */
+
+
+
 .backtest-summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
   padding: 20px;
 }
 
@@ -1095,27 +1103,39 @@ input.dashboard-filter {
   background: #fafafa;
   border: var(--border-default);
   border-radius: var(--radius-control);
-  padding: 16px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  min-height: 78px;
   transition: var(--transition-standard);
+  overflow: hidden;
 }
 .summary-tile-card:hover {
   background: #f0f0f0;
 }
 
 .summary-tile-card .tile-label {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-muted);
   text-transform: uppercase;
+  letter-spacing: 0.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .summary-tile-card .tile-value {
   font-family: var(--font-mono);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 500;
   color: var(--color-accent);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 /* Parameter sweep heatmap grid */

@@ -10,6 +10,8 @@ import yfinance as yf
 import pandas as pd
 import logging
 
+from ._yf_safe import safe_call
+
 logger = logging.getLogger("scylla.put_call_ratio")
 router = APIRouter()
 
@@ -31,8 +33,8 @@ def fetch_pcr_history(ticker: str, days: int = 10) -> list[dict]:
     Capped at 10 expiries max for fast startup response.
     """
     try:
-        tk = yf.Ticker(ticker)
-        expirations = tk.options
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        expirations = safe_call(lambda t: list(t.options) if t.options else [], tk)
         if not expirations:
             return []
 
@@ -41,7 +43,7 @@ def fetch_pcr_history(ticker: str, days: int = 10) -> list[dict]:
         max_depth = min(days, 10)
         for exp in expirations[:max_depth]:
             try:
-                chain = tk.option_chain(exp)
+                chain = safe_call(lambda t, e: t.option_chain(e), tk, exp)
                 call_vol = chain.calls["volume"].fillna(0).sum()
                 put_vol = chain.puts["volume"].fillna(0).sum()
                 pcr = round(put_vol / call_vol, 4) if call_vol > 0 else 1.0

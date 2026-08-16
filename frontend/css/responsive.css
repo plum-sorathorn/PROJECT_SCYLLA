@@ -1,0 +1,77 @@
+/* ============================================================
+   PROJECT: SCYLLA // CONSOLE — Responsive: Media Queries & Accessibility
+   ============================================================ */
+
+/* ── Responsive Adaptation ──────────────────────────────── */
+@media (max-width: 1200px) {
+  .dashboard-grid {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 16px;
+    padding: 16px;
+  }
+  .card-full {
+    grid-column: span 6;
+  }
+  .card-half {
+    grid-column: span 6;
+  }
+  .card-quarter {
+    grid-column: span 3;
+  }
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: 60px;
+  }
+  .brand-text, .nav-label {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .app-container {
+    margin-left: 60px;
+  }
+  .site-header {
+    padding: 0 16px;
+    gap: 12px;
+  }
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+  .card-full, .card-half, .card-quarter {
+    grid-column: span 1;
+  }
+}
+
+@media (max-width: 640px) {
+  .site-header {
+    flex-direction: column;
+    height: auto;
+    padding: 12px;
+    align-items: flex-start;
+  }
+  .header-status {
+    width: 100%;
+    justify-content: space-between;
+    margin-top: 8px;
+  }
+  .summary-strip {
+    flex-wrap: wrap;
+  }
+  .summary-tile {
+    min-width: 50%;
+    border-bottom: var(--border-default);
+  }
+}
+
+/* Accessibility: Support user reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .site-header, .card, .modal-overlay, .modal-content {
+    animation: fadeIn 50ms linear forwards !important;
+    transform: none !important;
+  }
+  .shimmering {
+    animation: none !important;
+    background: transparent !important;
+  }
+}

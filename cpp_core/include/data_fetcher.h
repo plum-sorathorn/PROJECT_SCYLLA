@@ -61,5 +61,6 @@ std::vector<RawOptionRow>        fetchUnusualOptions(double minVolOI = 2.0);
 std::vector<PcrPoint>            fetchPutCallRatio(const std::vector<std::string>& tickers);
 std::vector<VolConcentrationPoint> fetchVolumeConcentration(const std::string& ticker = "SPY");
 IVSandboxResult                  fetchIVSkew(const std::string& ticker);
+std::string                      fetchTacticalBundle(double minVolOI, const std::string& volconTicker, const std::string& ivTicker);
 
 } // namespace scylla

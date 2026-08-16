@@ -10,7 +10,11 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Instrument+Serif:ital,wght@0,400;0,400i;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/pages.css" />
+  <link rel="stylesheet" href="css/responsive.css" />
 </head>
 <body>
 
@@ -268,9 +272,9 @@
           </select>
           <select id="dash-filter-bt-strategy" class="filter-select dashboard-filter" title="Filter by backtester strategy entry rules">
             <option value="ALL">ALL BACKTEST STRATEGIES</option>
-            <option value="quantile_confidence">QUANTILE CONFIDENCE</option>
-            <option value="trend_breakout">TREND BREAKOUT</option>
-            <option value="iv_regime_adaptive">IV REGIME ADAPTIVE</option>
+            <option value="whale_quality">WHALE QUALITY</option>
+            <option value="contrarian_trend">CONTRARIAN TREND</option>
+            <option value="vol_regime">VOL REGIME</option>
           </select>
           <span id="dash-bt-strategy-count" class="accent-gold" style="font-family: var(--font-mono); font-size: 10px;"></span>
           <input type="text" id="dash-filter-ticker" placeholder="Filter ticker..." class="filter-input dashboard-filter" style="width: 110px;" />
@@ -402,9 +406,9 @@
         <canvas id="chart-pcr"></canvas>
       </div>
       <div class="chart-legend">
-        <span class="legend-item" style="--c:#E2E2E2">SPY</span>
-        <span class="legend-item" style="--c:#D4AF37">QQQ</span>
-        <span class="legend-item" style="--c:#BF5A5A">IWM</span>
+        <span class="legend-item" style="--c:#005566">SPY</span>
+        <span class="legend-item" style="--c:#2d7a4a">QQQ</span>
+        <span class="legend-item" style="--c:#8b3a3a">IWM</span>
       </div>
     </section>
   
@@ -427,8 +431,8 @@
         <canvas id="chart-volcon"></canvas>
       </div>
       <div class="chart-legend">
-        <span class="legend-item" style="--c:#E2E2E2">CALLS</span>
-        <span class="legend-item" style="--c:#BF5A5A">PUTS</span>
+        <span class="legend-item" style="--c:#2d7a4a">CALLS</span>
+        <span class="legend-item" style="--c:#8b3a3a">PUTS</span>
       </div>
     </section>
   
@@ -542,16 +546,23 @@
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">STRATEGY TYPE</label>
               <select id="bt-strategy-type" class="filter-select">
-                <option value="quantile_confidence" selected>Quantile Confidence</option>
-                <option value="trend_breakout">Trend Breakout</option>
-                <option value="iv_regime_adaptive">IV Regime Adaptive</option>
+                <option value="vol_regime" selected>Vol Regime (OOS: +17.2% / 9.7yr, Sharpe 1.57, 61 trades)</option>
+                <option value="contrarian_trend">Contrarian Trend (OOS: +107.8% / 9.7yr, Sharpe 3.18, 107 trades)</option>
+                <option value="whale_quality">Whale Quality (OOS: +115.2% / 9.7yr, Sharpe 2.62, 123 trades)</option>
               </select>
             </div>
 
+            <!-- BACKTEST FORM DEFAULTS — these value="..." attributes are the LAST-RESORT
+                 fallback only (used when JS fails to load OR the API is unreachable).
+                 The single source of truth is backend/config/strategy_defaults.json,
+                 served via /api/ml/strategy-defaults and consumed by app.js loadOptimalParams().
+                 Values below mirror the vol_regime block (default-selected strategy) from
+                 the v2 sweep (scripts/sweep_strategies_v2.py, 2026-07-28).
+                 If you change values here, also update the JSON file so they stay in sync. -->
             <!-- Max Concurrent Trades (highest_prob_scan only) -->
             <div class="form-group" id="bt-max-concurrent-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MAX CONCURRENT TRADES</label>
-              <input type="number" id="bt-max-concurrent" value="8" min="1" max="8" step="1" class="filter-input" />
+              <input type="number" id="bt-max-concurrent" value="10" min="1" max="20" step="1" class="filter-input" />
             </div>
 
             <!-- Scan Time (highest_prob_scan only) -->
@@ -563,7 +574,7 @@
             <!-- Min Prob Threshold -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN SUCCESS PROBABILITY (%)</label>
-              <input type="number" id="bt-prob-threshold" value="40" min="2" max="98" step="1" class="filter-input" />
+              <input type="number" id="bt-prob-threshold" value="43" min="2" max="98" step="1" class="filter-input" />
             </div>
 
             <!-- Min Kelly Fraction -->
@@ -575,31 +586,31 @@
             <!-- Hard Stop Loss -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">HARD STOP LOSS (%)</label>
-              <input type="number" id="bt-hard-stop-loss" value="25" min="25" max="100" step="0.5" class="filter-input" placeholder="25% minimum" />
+              <input type="number" id="bt-hard-stop-loss" value="20" min="1" max="100" step="0.5" class="filter-input" placeholder="20% default" />
             </div>
 
             <!-- Kelly Allocation Cap -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">KELLY ALLOCATION CAP (%)</label>
-              <input type="number" id="bt-kelly-cap" value="12" min="1" max="20" step="1" class="filter-input" placeholder="12% max" />
+              <input type="number" id="bt-kelly-cap" value="16" min="1" max="20" step="1" class="filter-input" placeholder="16% default" />
             </div>
 
             <!-- Profit Threshold -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">PROFIT THRESHOLD (%)</label>
-              <input type="number" id="bt-profit-threshold" value="10" min="1" max="500" step="0.5" class="filter-input" placeholder="10%" />
+              <input type="number" id="bt-profit-threshold" value="44" min="1" max="500" step="0.5" class="filter-input" placeholder="44% default" />
             </div>
 
             <!-- Max Quantile Spread -->
-            <div class="form-group strategy-field" id="bt-max-quantile-spread-group" data-strategies="quantile_confidence" style="display: flex; flex-direction: column;">
+            <div class="form-group strategy-field" id="bt-max-quantile-spread-group" data-strategies="whale_quality" style="display: flex; flex-direction: column;">
               <label class="field-label">MAX QUANTILE SPREAD (IQR)</label>
-              <input type="number" id="bt-max-quantile-spread" value="0.20" min="0.01" max="10.0" step="0.01" class="filter-input" placeholder="0.20" />
+              <input type="number" id="bt-max-quantile-spread" value="0.34" min="0.01" max="10.0" step="0.01" class="filter-input" placeholder="0.34" />
             </div>
 
             <!-- Min Median Return -->
-            <div class="form-group strategy-field" id="bt-min-median-return-group" data-strategies="trend_breakout" style="display: flex; flex-direction: column;">
+            <div class="form-group strategy-field" id="bt-min-median-return-group" data-strategies="contrarian_trend" style="display: flex; flex-direction: column;">
               <label class="field-label">MIN MEDIAN RETURN (%)</label>
-              <input type="number" id="bt-min-median-return" value="2" min="0.5" max="20" step="0.5" class="filter-input" placeholder="2%" />
+              <input type="number" id="bt-min-median-return" value="0.0" min="0.0" max="20" step="0.1" class="filter-input" placeholder="0.0%" />
             </div>
 
             <!-- Slippage -->
@@ -617,7 +628,7 @@
             <!-- Max Risk per Trade -->
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">MAX RISK PER TRADE (%)</label>
-              <input type="number" id="bt-max-risk" value="3.0" min="0.1" max="10" step="0.1" class="filter-input" />
+              <input type="number" id="bt-max-risk" value="2.0" min="0.1" max="10" step="0.1" class="filter-input" />
             </div>
 
             <!-- Lookback Period Slider -->
@@ -644,11 +655,11 @@
             <div id="kelly-config-group">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <label class="field-label" id="kelly-label-text">KELLY MULTIPLIER</label>
-                <span id="kelly-val-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">0.75</span>
+                <span id="kelly-val-display" class="accent-gold" style="font-family: var(--font-mono); font-size: 11px;">0.97</span>
               </div>
               <!-- Single Input -->
               <div id="kelly-single-input">
-                <input type="range" id="bt-kelly-multiplier" min="0.05" max="1.0" value="0.75" step="0.05" class="filter-slider" />
+                <input type="range" id="bt-kelly-multiplier" min="0.05" max="1.0" value="0.97" step="0.05" class="filter-slider" />
               </div>
               <!-- Sweep Inputs -->
               <div id="kelly-sweep-inputs" style="display: none; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
@@ -703,16 +714,18 @@
             </div>
             <div class="form-group" style="display: flex; flex-direction: column;">
               <label class="field-label">TEST INCREMENT (TRADES)</label>
-              <input type="number" id="bt-test-increment" value="100" min="1" step="1" class="filter-input" />
+              <input type="number" id="bt-test-increment" value="500" min="1" step="1" class="filter-input" />
             </div>
           </div>
 
           <!-- Bottom bar: Sweep Toggle and Run Button -->
           <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px;">
-            <label class="filter-label checkbox-label" style="margin-left: 0; user-select: none; cursor: pointer;">
-              <input type="checkbox" id="bt-sweep-enable" class="filter-checkbox" />
-              ENABLE PARAMETER SWEEP GRID (Kelly × λ)
-            </label>
+            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+              <label class="filter-label checkbox-label" style="margin-left: 0; user-select: none; cursor: pointer;">
+                <input type="checkbox" id="bt-sweep-enable" class="filter-checkbox" />
+                ENABLE PARAMETER SWEEP GRID (Kelly × λ)
+              </label>
+            </div>
             <button type="submit" class="btn-refresh" id="btn-run-backtest" onclick="runBacktestSimulation(event)" style="min-width: 180px; justify-content: center; height: 35px;">
               RUN BACKTEST SIMULATION
             </button>
@@ -734,6 +747,11 @@
       </div>
       <div style="padding: 16px;">
         <div class="backtest-summary-grid">
+          <div class="summary-tile-card">
+            <span class="tile-label">DATA SPAN</span>
+            <span class="tile-value accent-gold" id="bt-sum-dataspan">--</span>
+            <span class="tile-sub" id="bt-sum-dataspan-sub">--</span>
+          </div>
           <div class="summary-tile-card">
             <span class="tile-label">CUMULATIVE P&L (%)</span>
             <span class="tile-value" id="bt-sum-pnl">--%</span>
@@ -907,7 +925,7 @@
             <label style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-bottom: 4px;">EVALUATION HORIZON (DAYS)</label>
             <select id="cfg-horizon" class="filter-select" style="width: 100%;">
               <option value="5">5</option>
-              <option value="10">10</option>
+              <option value="10" selected>10</option>
               <option value="20">20</option>
               <option value="30">30</option>
               <option value="45">45</option>
@@ -922,6 +940,9 @@
               <option value="0.03">3%</option>
               <option value="0.05">5%</option>
               <option value="0.10">10%</option>
+              <option value="0.25">25%</option>
+              <option value="0.50" selected>50%</option>
+              <option value="1.00">100%</option>
             </select>
           </div>
         </div>
@@ -1081,6 +1102,13 @@
 
 </div> <!-- .app-container -->
 
+<script src="js/state.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/api.js"></script>
+<script src="js/scanner.js"></script>
+<script src="js/ml.js"></script>
+<script src="js/backtest.js"></script>
+<script src="js/dashboard.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

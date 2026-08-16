@@ -147,86 +147,12 @@ Fetches vendored C++ dependencies (Crow, Asio, LightGBM, nlohmann/json, libcurl)
 .\scripts\deploy.ps1
 ```
 
----
+## Features
+- **Whale Scanner** — EOD unusual options vol/OI ≥5x glow neon blue
+- **Put/Call Ratio Tracker** — SPY/QQQ/IWM 30-day trend
+- **Volume Concentration** — Stacked bar by expiration cycle
+- **IV Sandbox & Skew** — IV Rank, Percentile, Volatility Smile
+- **Swing Alignment** — 50d/200d SMA trend flags on whale tickers
+- **Expected Move** — ATM straddle ±$ range calculator
 
-## API Reference
-
-### Machine Learning & Quantitative Endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/ml/predict` | `POST` | Executes LightGBM inference on feature vector; returns directional regime and win probability. |
-| `/api/ml/backtest` | `POST` | Runs a walk-forward simulation on selected strategy archetype with full portfolio metrics. |
-| `/api/ml/strategy-defaults` | `GET` | Returns Pareto-optimal strategy thresholds and sweep hyperparameters. |
-| `/health` | `GET` | Health check endpoint available on both `:8080` (C++) and `:6900` (Python). |
-
-### Market Analytics Endpoints
-
-| Endpoint | Method | Query Parameters | Description |
-|---|---|---|---|
-| `/unusual-options` | `GET` | `symbol`, `min_vol_oi` | Scans options chain for unusual institutional volume surges. |
-| `/iv-skew` | `GET` | `symbol` | Computes strike-by-strike IV smile and Put/Call skew curve. |
-| `/put-call-ratio` | `GET` | `symbol` | Retrieves 30-day historical Put/Call ratio trend series. |
-| `/volume-concentration` | `GET` | `symbol` | Calculates volume and open interest breakdown by expiration cycle. |
-| `/technicals` | `GET` | `symbol` | Computes 50-day and 200-day SMAs, trend alignment, and momentum. |
-
----
-
-## Directory Structure
-
-```text
-PROJECT_SCYLLA/
-├── backend/                        # FastAPI Data & Analytics Service
-│   ├── config/                     # Strategy parameters & constants
-│   ├── db/                         # SQLite database schema & queries
-│   ├── models/                     # Features, training & prediction logic
-│   ├── backtest/                   # Walk-forward backtesting engine
-│   ├── routers/                    # Specialized REST API endpoints
-│   ├── requirements.txt            # Python dependencies
-│   └── main.py                     # Backend application entry point
-├── cpp_core/                       # High-Performance C++20 Core
-│   ├── CMakeLists.txt              # CMake build configuration
-│   ├── include/                    # Header interfaces (Inference, Metrics, Fetcher)
-│   ├── src/                        # Implementation files
-│   └── third_party/                # Vendored libraries (Crow, LightGBM, Asio, etc.)
-├── frontend/                       # Web Terminal Interface
-│   ├── css/                        # Modular stylesheet system
-│   ├── js/                         # Modular ES6+ application state & views
-│   ├── index.html                  # Terminal dashboard HTML
-│   └── app.js                      # Frontend coordinator
-├── scripts/                        # Automation & Quantitative Tooling
-│   ├── deploy.ps1                  # Production deployment script
-│   ├── start_dev.ps1               # Developer mode script
-│   ├── fetch_vendors.ps1           # C++ third-party library downloader
-│   ├── sweep_strategies_v2.py      # Strategy hyperparameter grid optimizer
-│   └── validate_synthetic_vs_real.py # Kolmogorov-Smirnov distribution validator
-├── LAUNCH_SCYLLA.ps1               # One-click PowerShell launcher
-├── LAUNCH_SCYLLA.bat               # Windows batch launcher
-├── AGENTS.md                       # Technical architecture & agent guidelines
-└── README.md                       # Project documentation
-```
-
----
-
-## Validation & Statistical Integrity
-
-Project Scylla includes statistical verification scripts to ensure dataset integrity and validate synthetic Monte Carlo simulation benchmarks against real-world option distributions:
-
-```powershell
-# Run Kolmogorov-Smirnov distribution fidelity tests
-python scripts\validate_synthetic_vs_real.py
-
-# Audit synthetic training datasets for integrity
-python scripts\audit_synthetic_dataset.py
-
-# Run strategy hyperparameter sweep optimizer
-python scripts\sweep_strategies_v2.py
-```
-
----
-
-## License & Disclaimer
-
-Distributed under the **MIT License**. See `LICENSE` for more information.
-
-> **Disclaimer:** *Project Scylla is an analytical software tool built for quantitative research and educational purposes. It does not constitute financial, investment, or trading advice. Options trading involves substantial risk of loss and is not suitable for every investor.*
+**No paid API keys required.** All data via free yfinance + OpenBB ODP.

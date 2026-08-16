@@ -13,6 +13,8 @@ import pandas as pd
 import numpy as np
 import logging
 
+from ._yf_safe import safe_call
+
 logger = logging.getLogger("scylla.iv_skew")
 router = APIRouter()
 
@@ -24,8 +26,8 @@ def compute_historical_vol(ticker: str, window: int = 30) -> tuple[float, float,
     Returns (current_iv, iv_rank, iv_percentile).
     """
     try:
-        tk = yf.Ticker(ticker)
-        hist = tk.history(period="1y")
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        hist = safe_call(lambda t: t.history(period="1y"), tk)
         if hist.empty or len(hist) < window + 5:
             return 0.0, 0.0, 0.0
 
@@ -48,12 +50,13 @@ def compute_historical_vol(ticker: str, window: int = 30) -> tuple[float, float,
 def fetch_iv_smile(ticker: str, num_expiries: int = 2) -> list[dict]:
     """Returns strike vs IV data for the front N expiry cycles."""
     try:
-        tk = yf.Ticker(ticker)
-        expirations = tk.options[:num_expiries]
+        tk = safe_call(yf.Ticker, ticker, retries=1)
+        all_exps = safe_call(lambda t: list(t.options) if t.options else [], tk)
+        expirations = all_exps[:num_expiries]
         smile_data = []
 
         for exp in expirations:
-            chain = tk.option_chain(exp)
+            chain = safe_call(lambda t, e: t.option_chain(e), tk, exp)
             calls = chain.calls[["strike", "impliedVolatility"]].copy()
             calls["optionType"] = "Call"
             calls["expiration"] = exp

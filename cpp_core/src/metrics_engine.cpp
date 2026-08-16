@@ -10,6 +10,28 @@
 #include <cmath>
 #include <numeric>
 
+// ------------------------------------------------------------
+// SCYLLA PHASE B.1 — vendor link smoke test (LEAVE COMMENTED).
+// Uncomment the block below on a machine with MSVC to verify
+// that lib_lightgbm.dll and libcurl-x64.dll import correctly,
+// then re-comment (or delete) it before committing B.3 logic.
+// ------------------------------------------------------------
+#if 0
+#include <lightgbm/c_api.h>
+#include <curl/curl.h>
+
+[[maybe_unused]] static void scylla_phase_b1_smoke_test() {
+    // LightGBM C API link check (no real model yet — Phase B.3).
+    void* booster = nullptr;
+    LGBM_BoosterCreate(0, 0, reinterpret_cast<BoosterHandle*>(&booster));
+    LGBM_BoosterFree(static_cast<BoosterHandle>(booster));
+
+    // libcurl link check (no real request yet — Phase B.3).
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    curl_global_cleanup();
+}
+#endif
+
 namespace scylla {
 
 // Process a single row to produce enriched ProcessedOptionRow
@@ -49,27 +71,41 @@ static ProcessedOptionRow processRow(const RawOptionRow& raw) {
     return p;
 }
 
-// Multi-threaded processing — splits work across hardware threads
+// Multi-threaded processing — splits work across hardware threads.
+// PARALLELIZATION_PLAN §4.11: skip thread overhead for N < 1000 rows.
+// For the typical 200-row live-scan payload, single-threaded is measurably
+// faster because thread creation cost (~µs) exceeds per-row compute work.
+// The crossover point was empirically estimated at ~1000 rows.
+static constexpr size_t PARALLEL_THRESHOLD = 1000;
+
 std::vector<ProcessedOptionRow> processOptionRows(std::vector<RawOptionRow> rawRows) {
     size_t n = rawRows.size();
     std::vector<ProcessedOptionRow> result(n);
 
-    unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
-    size_t chunkSize = (n + numThreads - 1) / numThreads;
-    std::vector<std::thread> threads;
+    if (n < PARALLEL_THRESHOLD) {
+        // Single-threaded fast path — avoids thread creation overhead
+        for (size_t i = 0; i < n; ++i) {
+            result[i] = processRow(rawRows[i]);
+        }
+    } else {
+        // Multi-threaded path for large batches (N >= 1000)
+        unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
+        size_t chunkSize = (n + numThreads - 1) / numThreads;
+        std::vector<std::thread> threads;
 
-    for (unsigned int t = 0; t < numThreads; ++t) {
-        size_t start = t * chunkSize;
-        size_t end   = std::min(start + chunkSize, n);
-        if (start >= n) break;
+        for (unsigned int t = 0; t < numThreads; ++t) {
+            size_t start = t * chunkSize;
+            size_t end   = std::min(start + chunkSize, n);
+            if (start >= n) break;
 
-        threads.emplace_back([&, start, end]() {
-            for (size_t i = start; i < end; ++i) {
-                result[i] = processRow(rawRows[i]);
-            }
-        });
+            threads.emplace_back([&, start, end]() {
+                for (size_t i = start; i < end; ++i) {
+                    result[i] = processRow(rawRows[i]);
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
     }
-    for (auto& th : threads) th.join();
 
     // Sort by volOiRatio descending
     std::sort(result.begin(), result.end(), [](const ProcessedOptionRow& a, const ProcessedOptionRow& b) {
