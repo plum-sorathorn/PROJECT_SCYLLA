@@ -1,4 +1,4 @@
-﻿---
+---
 trigger: always_on
 description: Consult the graphify knowledge graph at graphify-out/ for codebase and architecture questions.
 ---

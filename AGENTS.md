@@ -1,97 +1,181 @@
-﻿# AGENTS.md — PROJECT: SCYLLA // TERMINAL
+# PROJECT SCYLLA — Agent & Developer Blueprint
 
-High-performance options whale scanner. Hybrid 3-tier: cyberpunk HTML/JS frontend → C++ Crow (`scylla_core.exe`, :8080) → Python FastAPI/OpenBB ODP (uvicorn, :6900) → yfinance + CBOE. Windows-only. No paid API keys.
+High-performance options whale scanner and quantitative analytics engine combining an asynchronous Python FastAPI data pipeline (`:6900`), a native C++ Crow microservice with embedded LightGBM inference (`:8080`), and a modular real-time frontend.
 
-## Quick reference
+---
 
-| Action | Command |
-|---|---|
-| One-click launch (user) | `.\LAUNCH_SCYLLA.ps1` (or `.bat`) |
-| Dev mode (Python only, no C++ build) | `.\scripts\start_dev.ps1` |
-| Full production build + launch | `.\scripts\deploy.ps1` |
-| C++ build only | `cd cpp_core\build && cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release && cmake --build . --config Release --parallel` |
-| Python venv activate | `backend\.venv\Scripts\Activate.ps1` |
-| Run Python backend | `uvicorn main:app --host 127.0.0.1 --port 6900 --reload` (from `backend\`) |
-| Health check | `curl http://127.0.0.1:8080/health` and `:6900/health` |
-
-Ports: C++ **8080**, Python **6900**. Do not change without updating `data_fetcher.cpp` and `frontend\app.js`.
-
-## Architecture (data flow)
+## 1. System Architecture & Topology
 
 ```
-frontend/index.html ─HTTP─> C++ Crow (8080, multithreaded)
-                                │ WinHTTP, hardcoded 127.0.0.1:6900
-                                ▼
-                          Python FastAPI (6900, CORS=*)
-                                │ yfinance / openbb==4.3.2 / CBOE
-                                ▼
-                          data providers
+┌─────────────────────────────────────────────────────────────┐
+│                 Frontend (Vanilla JS / ES6+)                │
+│             http://127.0.0.1:8080 or :6900 (Dev)            │
+└──────────────┬───────────────────────────────▲──────────────┘
+               │ HTTP / JSON API               │
+               ▼                               │
+┌──────────────────────────────┐               │
+│      C++ Crow Core Engine    │               │
+│     (cpp_core @ Port 8080)   │               │
+├──────────────────────────────┤               │
+│ • Native LightGBM Inference  │               │
+│ • Real-time Metrics Engine   │               │
+│ • Outbound Data Fetcher      │               │
+└──────────────┬───────────────┘               │
+               │ HTTP WinHTTP / libcurl        │
+               ▼                               │
+┌──────────────────────────────────────────────┴──────────────┐
+│                  Python FastAPI Data Engine                 │
+│                     (backend @ Port 6900)                   │
+├─────────────────────────────────────────────────────────────┤
+│ • Resilient Options Chain Scraping (_yf_safe retry/backoff) │
+│ • Feature Engineering (HV, VIX, Skew, Vol/OI, Technicals)   │
+│ • Walk-Forward Strategy Simulation & Sweep Optimizations    │
+│ • SQLite Signal & Regime Persistence                        │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+            ┌────────────────────────────────────┐
+            │ Public Market Feeds (Zero API Key) │
+            │      yfinance / CBOE Indices       │
+            └────────────────────────────────────┘
 ```
 
-The C++ ↔ Python bridge is `cpp_core\src\data_fetcher.cpp`. It uses **WinHTTP** (`#pragma comment(lib, "winhttp.lib")`), sets **no timeouts** (OS defaults ~120s), and has **no retry** — any failure throws `std::runtime_error` and the request fails. C++ routes call into `data_fetcher` and `metrics_engine` only; no other outbound HTTP in C++.
+---
 
-## Backend layout
+## 2. Quick Command Reference
 
-- `backend\main.py` — FastAPI app; mounts 6 routers under both `/api/v1` and `/api` (compat for direct dev mode), serves `frontend\` as static at `/`, CORS wide open, `GET /health`.
-- `backend\routers\` — `unusual_options.py`, `put_call_ratio.py`, `volume_concentration.py`, `iv_skew.py`, `technicals.py`, `ml_model.py`, `ml_derivations.py`. All 7 are real; none are stubs.
-- `cpp_core\src\main.cpp` — Crow `SimpleApp` on :8080, calls `registerRoutes(app)`.
-- `cpp_core\src\api_handlers.cpp` — HTTP routes: `/health`, `/api/scanner`, `/api/put-call-ratio`, `/api/volume-concentration`, `/api/iv-skew`, `/` (static), `/<path>` (SPA catch-all from `frontend\dist\`).
-- `frontend\app.js` — `API_BASE` defaults to `http://127.0.0.1:6900` (line ~9). **This file is patched in-place by the launcher scripts** to swap 6900↔8080 depending on whether `scylla_core.exe` exists. Treat the on-disk value as ephemeral.
+| Task | Command | Notes |
+|---|---|---|
+| **One-Click Launch** | `.\LAUNCH_SCYLLA.ps1` or `LAUNCH_SCYLLA.bat` | Auto-installs venv/deps, frees ports, compiles C++ if ready, patches frontend API base, opens browser. |
+| **Dev Mode (Fast)** | `.\scripts\start_dev.ps1` | Python-only fast boot; bypasses C++ compilation. |
+| **Production Build** | `.\scripts\deploy.ps1` | Fetches vendors, compiles C++ Release binary, launches full dual-engine stack. |
+| **Fetch C++ Vendors** | `.\scripts\fetch_vendors.ps1` | Downloads Crow, Asio, nlohmann/json, LightGBM, and libcurl headers/binaries into `cpp_core/third_party/`. |
+| **C++ Manual Build** | `cd cpp_core\build && cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release && cmake --build . --config Release --parallel` | MSVC x64 build (VS 2022 or VS 2026). |
+| **Python Backend** | `backend\.venv\Scripts\Activate.ps1; cd backend; uvicorn main:app --host 127.0.0.1 --port 6900 --reload` | FastAPI reload mode. |
+| **Health Checks** | `curl http://127.0.0.1:8080/health`<br>`curl http://127.0.0.1:6900/health` | Verifies C++ and Python services. |
+| **Strategy Sweeps** | `python scripts\sweep_strategies_v2.py` | Multi-parameter grid search across strategy regimes. |
+| **Backtest Smoke Test**| `curl -X POST http://127.0.0.1:6900/api/ml/backtest -H "Content-Type: application/json" -d "{\"mode\":\"walkforward\",\"strategy_type\":\"vol_regime\"}"` | Validates walk-forward simulator. |
 
-## C++ build (Windows, MSVC required)
+> **Port Management Note:** Ports `6900` (Python) and `8080` (C++) must move together. C++ fetches options data from `127.0.0.1:6900`, while the launch script patches `frontend/app.js` (`API_BASE`) to route frontend queries directly to the active coordinator.
 
-- Generator: **Visual Studio 17 2022**, x64, C++17.
-- Vendored headers (Crow, Asio standalone, nlohmann/json) in `cpp_core\third_party\`. Populated by `scripts\fetch_vendors.ps1` — do not hand-edit.
-- Output: `cpp_core\build\Release\scylla_core.exe`.
-- Links `ws2_32` + `wsock32` (Windows sockets).
-- `deploy.ps1` calls `fetch_vendors.ps1` before `cmake`; if C++ build fails, deploy auto-falls-back to dev mode (Python serves frontend directly via `python -m http.server 8080`).
+---
 
-## ML pipeline (worth knowing)
+## 3. Directory Blueprint
 
-`backend\routers\ml_model.py` is the only stateful piece:
-- SQLite DB: `backend\scylla_ml.db` (gitignored). Has a `.bak` next to it.
-- Model pickle: `backend\cache\scylla_predictor.pkl` (gitignored).
-- LightGBM quantile regression, `LABELING_VERSION = "v2_settlement"`, default `horizon_days=10`, `profit_threshold=0.03`, `prob_threshold=0.55`, `_execute_with_retry` = 5 retries + exp backoff, DB in WAL mode.
-- `backend\routers\ml_derivations.py` is pure functions (P(success), strategy, Kelly). Clip bounds `0.02`/`0.98`, `kelly_cap=0.25`.
+```text
+PROJECT_SCYLLA/
+├── backend/                        # Python FastAPI service & ML pipeline
+│   ├── config/
+│   │   ├── constants.py            # Global paths, labeling constants, sweep paths
+│   │   ├── _strategy_loader.py     # Strategy config loader
+│   │   └── strategy_defaults.json  # Source of truth for portfolio strategy regimes
+│   ├── db/
+│   │   ├── schema.py               # SQLite schema & table initialization
+│   │   └── queries.py              # Queries, transactional logging, retry wrapper
+│   ├── models/
+│   │   ├── features.py             # Feature vector engineering (HV, VIX, Skew, etc.)
+│   │   ├── predict.py              # C++ inference caller with local LightGBM fallback
+│   │   └── train.py                # Model training & C++ artifact serialization
+│   ├── backtest/
+│   │   └── walkforward.py          # Walk-forward out-of-sample backtesting worker
+│   ├── routers/
+│   │   ├── _yf_safe.py             # Resilient yfinance wrapper (timeout, backoff, jitter)
+│   │   ├── unusual_options.py      # Institutional flow / whale options endpoint
+│   │   ├── put_call_ratio.py       # 30-day PCR tracker (SPY, QQQ, IWM)
+│   │   ├── volume_concentration.py # Expiration cycle volume stacking
+│   │   ├── iv_skew.py              # IV rank, percentile & volatility smile curves
+│   │   ├── technicals.py           # Trend SMA (50d/200d) & momentum signals
+│   │   ├── ml_derivations.py       # Kelly criterion, EV, and statistical metrics
+│   │   └── ml_model.py             # Backtest orchestration & prediction APIs
+│   ├── requirements.txt            # Locked Python dependencies
+│   └── main.py                     # FastAPI entry point & router aggregation
+│
+├── cpp_core/                       # C++ Crow high-performance native core
+│   ├── CMakeLists.txt              # CMake x64 build configuration
+│   ├── include/
+│   │   ├── api_handlers.h          # REST endpoint route declarations
+│   │   ├── data_fetcher.h          # WinHTTP / libcurl asynchronous data client
+│   │   ├── inference_engine.h      # LightGBM C-API inference bindings & structs
+│   │   └── metrics_engine.h        # Real-time quantitative calculations
+│   ├── src/
+│   │   ├── api_handlers.cpp        # Endpoint implementation
+│   │   ├── data_fetcher.cpp        # Data fetching bridge to Python backend
+│   │   ├── inference_engine.cpp    # Native LightGBM prediction engine
+│   │   ├── metrics_engine.cpp      # High-speed metrics calculations
+│   │   └── main.cpp                # Crow server bootstrap on :8080
+│   └── third_party/                # Vendored headers/libs (Crow, Asio, LightGBM, JSON)
+│
+├── frontend/                       # Vanilla ES6+ Web Interface
+│   ├── css/                        # Modular CSS (base, layout, components, pages)
+│   ├── js/                         # Modular JS (state, api, scanner, ml, backtest)
+│   ├── index.html                  # Main terminal interface
+│   └── app.js                      # Application orchestrator & router
+│
+└── scripts/                        # Automation & validation tooling
+    ├── deploy.ps1                  # Full build, vendor fetch & deploy script
+    ├── start_dev.ps1               # Lightweight developer launcher
+    ├── fetch_vendors.ps1           # Third-party dependency installer
+    ├── sweep_strategies_v2.py      # Quantitative strategy optimizer
+    ├── validate_synthetic_vs_real.py # KS distribution validator
+    └── audit_synthetic_dataset.py  # Dataset audit & statistical validation
+```
 
-## No-go / fragile files (do not edit casually)
+---
 
-- `frontend\app.js` — rewritten by launchers. If you change `API_BASE`, also update the patch logic in `LAUNCH_SCYLLA.ps1` and `scripts\start_dev.ps1`.
-- `backend\scylla_ml.db`, `backend\scylla_ml.db.bak`, `backend\cache\*.pkl` — runtime state, gitignored.
-- `cpp_core\third_party\` — vendored, managed by `fetch_vendors.ps1`.
-- `cpp_core\build\`, `backend\.venv\`, `**\__pycache__\`, `graphify-out\`, `.env` — all gitignored build/cache/output.
-- `.env` (repo root) — gitignored runtime config; never commit equivalents. Holds port/data-provider settings.
+## 4. Invariants & Critical Gotchas
 
-## Gotchas
+### 1. Schema Parity (`PredictRowInput`)
+`PredictRowInput` in [`cpp_core/include/inference_engine.h`](file:///C:/Users/plum/Documents/FIN%20Works/PROJECT_SCYLLA/cpp_core/include/inference_engine.h) must remain in **exact lock-step** with the feature ordering generated in [`backend/models/features.py`](file:///C:/Users/plum/Documents/FIN%20Works/PROJECT_SCYLLA/backend/models/features.py) and consumed in [`backend/models/predict.py`](file:///C:/Users/plum/Documents/FIN%20Works/PROJECT_SCYLLA/backend/models/predict.py). Any modification to input dimensions or feature keys requires updating both layers simultaneously.
 
-- **No tests, no lint, no typecheck, no CI** are configured. There is no `pytest.ini`, no `mypy.ini`/`ruff.toml`/`.flake8`, no `.eslintrc`/`.prettierrc`, no `tsconfig.json`, no `Makefile`, no `.github\`. Do not invent a framework mid-task — ask before adding one.
-- **C++ exe is optional.** Full app runs in dev mode (Python serves frontend) without ever compiling C++.
-- **Whale threshold**: vol/OI ≥ 5x. Default `min_vol_oi=2.0` in C++ (`data_fetcher.h:60`), `8.0` in Python router default, ≥ 5.0 in scanner logic. These are three different defaults — be explicit when changing.
-- **No HTTP timeouts in C++ bridge.** A hung Python backend will hang the C++ request for ~120s. Not a current bug, just expected.
-- **Backend `allow_origins=["*"]`** — local-dev only, do not assume this is safe in any future deploy.
-- **Hardcoded `127.0.0.1`** in `data_fetcher.cpp` and `app.js`. Both must move together if you ever bind to a real interface.
+### 2. Strategy Vocabularies Differ by Layer
+Do not mix per-trade ML signals with portfolio-level strategies:
+- **Per-Trade Signals** (Classifier labels):
+  - `VOL_EXPANSION`
+  - `SIDEWAYS`
+  - `BULLISH_BREAKOUT`
+  - `BEARISH_BREAKDOWN`
+- **Portfolio Strategy Regimes** (Backtester & Strategy configs):
+  - `whale_quality`: Filters high-conviction institutional flow with volume/OI spikes and technical trend alignment.
+  - `contrarian_trend`: Mean-reversion signals exploiting extreme IV skew and overextended technical conditions.
+  - `vol_regime`: Adaptive volatility strategy scaling position sizes based on historical vs implied volatility spreads and VIX tiers.
 
-## OpenCode / agent conventions (project-specific)
+### 3. Dual Semantics of `profit_threshold`
+- **Backtest Take-Profit Threshold (`profit_threshold` in `strategy_defaults.json`)**: Range $\approx 0.386 - 0.486$. Governs the simulated option take-profit execution barrier.
+- **ML Labeling Floor (`profit_threshold` in `ml_settings`)**: Default $0.03$ ($3\%$). Governs the positive class label boundary during training sample generation.
+*These two thresholds are intentionally decoupled.*
 
-The repo uses a **graphify** knowledge graph (`graphify-out\`) as the primary navigation layer. Rules in `.opencode\rules\graphify.md` and `.agents\rules\graphify.md`:
+### 4. Whale Filter Thresholds Across Layers
+- **C++ Data Fetcher Layer**: `minVolOI = 2.0` ([`cpp_core/include/data_fetcher.h`](file:///C:/Users/plum/Documents/FIN%20Works/PROJECT_SCYLLA/cpp_core/include/data_fetcher.h)) ensures high-throughput ingestion without dropping potential candidates.
+- **Python Options Endpoint**: Default `min_vol_oi = 8.0` on `/unusual-options`.
+- **Frontend Whale Scanner Display**: Highlights entries with `vol_oi >= 5.0` as institutional whale trades.
 
-- **Query graphify before raw `grep`/`ls`/`read`** on unfamiliar code. Use `graphify query`, `graphify path`, `graphify explain`.
-- `graphify` CLI is on PATH — call it directly, never `npx`/`npm`/`pip`.
-- Run `graphify update .` after edits to keep the graph in sync.
-- For broad overviews, read `graphify-out\GRAPH_REPORT.md`; for nav, check `graphify-out\wiki\index.md` if present.
+### 5. Resilient Market Data Ingestion
+All third-party calls to `yfinance` **must** route through `_yf_safe.safe_call()`. Direct calls bypass the built-in rate limiter, exponential backoff, jitter, and circuit breaker, risking IP rate-limits from public quote providers.
 
-## Subagent routing (matches repo `AGENTS.md`/global rules)
+---
 
-- Read-only exploration → `Task(subagent_type="fast", ...)` (default).
-- Implementation / edits → `Task(subagent_type="medium", ...)` (default for this orchestrator).
-- Architecture/debug after ≥2 failures → `Task(subagent_type="heavy", ...)`. Before dispatching @heavy, gather concrete context via @fast.
-- Hard self-cap: ≤2 direct read-only tool calls per turn; dispatch @fast on the 3rd need.
+## 5. Machine Learning & Walk-Forward Rules
 
-## Where to look first when something is unclear
+1. **Strict Temporal Separation**: The walk-forward engine splits historical data chronologically into rolling in-sample (train) and out-of-sample (test) windows. No test fold data may be included in feature scaling or threshold tuning.
+2. **Deterministic Fallback**: If the C++ inference engine (`:8080`) is offline or unreachable, Python falls back automatically to local LightGBM CPU inference without dropping incoming requests.
+3. **Model Artifact Serialization**: Training runs export both the LightGBM `.txt` model file and the corresponding binary representation consumed by `InferenceEngine::load_model()`.
 
-1. `README.md` (architecture + quick start).
-2. `LAUNCH_SCYLLA.ps1` — what the user actually runs.
-3. `scripts\deploy.ps1` — full build pipeline, dev/prod branching.
-4. `cpp_core\src\main.cpp` + `data_fetcher.cpp` — the C++↔Python contract.
-5. `backend\main.py` — Python entry, router mounts, CORS, static serving.
-6. `graphify query <topic>` — fastest path to relevant code in a large repo.
+---
+
+## 6. Verification & Test Checklist
+
+Before committing changes:
+```powershell
+# 1. Test Python backend startup
+cd backend
+python -m py_compile main.py
+
+# 2. Run statistical KS tests
+python ..\scripts\validate_synthetic_vs_real.py
+
+# 3. Test strategy defaults endpoint
+curl http://127.0.0.1:6900/api/ml/strategy-defaults
+
+# 4. Verify walk-forward backtest simulator
+curl -X POST http://127.0.0.1:6900/api/ml/backtest -H "Content-Type: application/json" -d "{\"mode\":\"walkforward\",\"strategy_type\":\"vol_regime\"}"
+```

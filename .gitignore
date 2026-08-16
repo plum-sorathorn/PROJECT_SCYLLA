@@ -2,25 +2,33 @@
 # PROJECT: SCYLLA // .gitignore
 # ============================================================
 
-
-# ── Project-specific ─────────────────────────────────────────
+# ── Project & Graphify ───────────────────────────────────────
 graphify-out/
 *.bat.bak
+scylla_odp_launch.bat
+scylla_cpp_launch.bat
 
-# Databases & Model Weights / Cache
+# ── Databases, Weights & Caches ──────────────────────────────
 *.db
 *.sqlite
 *.sqlite3
 *.pkl
 *.pickle
+*.bin
+*.ubj
+backend/cache/
+!backend/cache/sweep_optimal_v2.json
 
-
-# C++ vendored headers (fetched by scripts/fetch_vendors.ps1)
+# ── C++ Vendored Headers & Libraries ─────────────────────────
 cpp_core/third_party/
 
-# C++ build output
+# ── C++ Build Output & MSVC / CMake ──────────────────────────
 cpp_core/build/
 cpp_core/out/
+cpp_core/bin/
+build/
+out/
+bin/
 *.exe
 *.obj
 *.pdb
@@ -29,49 +37,62 @@ cpp_core/out/
 *.lib
 *.dll
 *.so
+*.dylib
 *.a
 *.o
+*.tlog
+*.idb
+*.ipch
+*.aps
+*.ncb
+*.sdf
+*.VC.db
+*.VC.opendb
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
 compile_commands.json
+CMakeUserPresets.json
 .cmake/
 
 # ── Python ───────────────────────────────────────────────────
 backend/.venv/
+.venv/
+venv/
+env/
+__pycache__/
 **/__pycache__/
 **/*.py[cod]
 **/*.pyo
 **/*.pyd
 *.egg-info/
+*.egg
 dist/
-build/
 .eggs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.tox/
 htmlcov/
 .coverage
+.coverage.*
 coverage.xml
 
-# ── Environment & secrets ─────────────────────────────────────
+# ── Environment & Secrets ────────────────────────────────────
 .env
 .env.*
 *.env
 secrets.json
 config.local.*
 
-# ── Temp files written by the launcher ───────────────────────
-scylla_odp_launch.bat
-scylla_cpp_launch.bat
-
 # ── Logs ─────────────────────────────────────────────────────
 *.log
 logs/
 *.log.*
 
-# ── OS files ─────────────────────────────────────────────────
+# ── OS & Filesystem ──────────────────────────────────────────
 .DS_Store
 .DS_Store?
 ._*
@@ -82,7 +103,7 @@ ehthumbs.db
 desktop.ini
 $RECYCLE.BIN/
 
-# ── IDEs & editors ───────────────────────────────────────────
+# ── IDEs & Editors ───────────────────────────────────────────
 .vscode/
 !.vscode/extensions.json
 .idea/
@@ -92,27 +113,19 @@ $RECYCLE.BIN/
 *.sln.docstates
 *.vs/
 .vs/
-*.ncb
-*.sdf
-*.VC.db
-*.VC.opendb
 nbproject/
 .settings/
 
-# ── Node (if frontend ever gets a build step) ─────────────────
+# ── Node / Web (if bundled) ──────────────────────────────────
 node_modules/
 .next/
-out/
-dist/
 .npm
 .eslintcache
 *.tsbuildinfo
 
-# ── Misc ─────────────────────────────────────────────────────
+# ── Temporary & Swap Files ───────────────────────────────────
 *.swp
 *.swo
 *~
 *.bak
 *.tmp
-
-/.opencode
