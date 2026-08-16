@@ -1,10 +1,8 @@
 'use strict';
 
-const STRATEGY_DEFAULT_PARAMS = {
-  whale_quality:     { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0.25, median_ret: 0, max_iv: 150, profit: 50 },
-  contrarian_trend:  { prob: 35, kelly: 0.90, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 50 },
-  vol_regime:        { prob: 35, kelly: 0.75, kelly_cap: 5,  stop: 1.5, hard_stop: 4, max_spread: 0,    median_ret: 0, max_iv: 150, profit: 50 },
-};
+// Strategy numeric defaults live in backend/config/strategy_defaults.json only.
+// Frontend populates forms via /api/ml/strategy-defaults → state.strategyDefaults /
+// state.optimalParams (see loadOptimalParams + _buildOptimalParamsFromStrategyDefaults).
 
 function mapApiOptimalToFormInputs(params) {
   if (!params) return null;
@@ -21,6 +19,8 @@ function mapApiOptimalToFormInputs(params) {
     median_ret:  pct(params.min_median_return),
     max_spread:  params.max_quantile_spread,
     max_iv:      params.max_iv || 0,
+    walkforward_train_window: params.walkforward_train_window,
+    walkforward_test_increment: params.walkforward_test_increment,
   };
 }
 

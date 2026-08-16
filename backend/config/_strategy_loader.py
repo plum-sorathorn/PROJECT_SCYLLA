@@ -22,6 +22,11 @@ from typing import Optional
 _DEFAULTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_defaults.json")
 
 
+def get_defaults_path() -> str:
+    """Return the canonical strategy defaults path used by all consumers."""
+    return _DEFAULTS_PATH
+
+
 def load_defaults() -> dict:
     """Load and return the full strategy_defaults.json document."""
     with open(_DEFAULTS_PATH, "r", encoding="utf-8") as f:
@@ -32,13 +37,12 @@ def get_strategy_params(strategy_type: str) -> dict:
     """
     Return the per-strategy parameter block for the given strategy_type.
 
-    Falls back to the vol_regime block if the requested strategy_type is unknown,
-    so callers always get a structurally-complete dict (defensive default).
+    Raises ValueError if the requested strategy_type is unknown.
     """
     data = load_defaults()
     strategies = data.get("strategies", {})
     if strategy_type not in strategies:
-        return strategies.get("vol_regime", {})
+        raise ValueError(f"Unknown strategy_type: {strategy_type}. Valid: {sorted(strategies)}")
     return strategies[strategy_type]
 
 

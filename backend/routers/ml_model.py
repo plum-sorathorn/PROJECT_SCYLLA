@@ -4,6 +4,7 @@ from typing import List, Optional
 import sqlite3
 import asyncio
 import datetime
+import json
 import os
 import pandas as pd
 import numpy as np
@@ -28,7 +29,7 @@ try:
     from ..config.constants import (  # type: ignore[import-untyped]
         DB_PATH, CACHE_DIR, MODEL_PATH, _SCYLLA_MAX_PROC,
         LABELING_VERSION, _CPP_CORE_URL, BOOT_CACHE_PATH,
-        SWEEP_OPTIMAL_PATHS, STRATEGY_DEFAULTS_PATH,
+        SWEEP_OPTIMAL_PATHS,
     )
     from ..db.schema import init_db
     from ..db.queries import (  # type: ignore[import-untyped]
@@ -50,13 +51,18 @@ try:
     )
     from ..models.train import _fit_one_quantile_train, _serialize_cpp_inference_artifacts  # type: ignore[import-untyped]
     from ..backtest.walkforward import _wf_worker_init, _process_walkforward_step  # type: ignore[import-untyped]
-    from ..config._strategy_loader import get_strategy_params, get_common_params  # type: ignore[import-untyped]
+    from ..config._strategy_loader import (  # type: ignore[import-untyped]
+        get_common_params,
+        get_defaults_path,
+        get_strategy_params,
+        load_defaults,
+    )
 except ImportError:
     # When loaded as routers.ml_model (backend/ directory context)
     from config.constants import (  # type: ignore[import-untyped]
         DB_PATH, CACHE_DIR, MODEL_PATH, _SCYLLA_MAX_PROC,
         LABELING_VERSION, _CPP_CORE_URL, BOOT_CACHE_PATH,
-        SWEEP_OPTIMAL_PATHS, STRATEGY_DEFAULTS_PATH,
+        SWEEP_OPTIMAL_PATHS,
     )
     from db.schema import init_db
     from db.queries import (  # type: ignore[import-untyped]
@@ -78,7 +84,12 @@ except ImportError:
     )
     from models.train import _fit_one_quantile_train, _serialize_cpp_inference_artifacts  # type: ignore[import-untyped]
     from backtest.walkforward import _wf_worker_init, _process_walkforward_step  # type: ignore[import-untyped]
-    from config._strategy_loader import get_strategy_params, get_common_params  # type: ignore[import-untyped]
+    from config._strategy_loader import (  # type: ignore[import-untyped]
+        get_common_params,
+        get_defaults_path,
+        get_strategy_params,
+        load_defaults,
+    )
 
 logger = logging.getLogger("scylla.ml_model")
 router = APIRouter()
@@ -1410,8 +1421,7 @@ def api_get_stats():
 # ═══════════════════════════════════════════════════════════════
 
 # (get_real_trades moved → backend/db/queries.py, see import above)
-
-# (_strategy_loader imported above via try/except block)
+# Strategy defaults: single loader via config._strategy_loader (imported above).
 
 
 def _resolve_strategy_defaults(req: "BacktestRequestSchema") -> dict:
@@ -1429,7 +1439,18 @@ def _resolve_strategy_defaults(req: "BacktestRequestSchema") -> dict:
         v = getattr(req, field, None)
         if v is not None:
             return v
-        return (strat if kind == "strat" else common).get(file_key, default)
+        source = strat if kind == "strat" else common
+        if file_key in source:
+            return source[file_key]
+        logger.warning(
+            "Strategy defaults missing %s.%s; using explicit defensive fallback %r",
+            "strategy" if kind == "strat" else "common",
+            file_key,
+            default,
+        )
+        return default
+
+    max_quantile_spread = pick("max_quantile_spread", "max_quantile_spread", "strat", 0.0)
 
     return {
         "initial_capital":            pick("initial_capital", "initial_capital", "common", 100000.0),
@@ -1446,7 +1467,10 @@ def _resolve_strategy_defaults(req: "BacktestRequestSchema") -> dict:
         "hard_stop_loss":             pick("hard_stop_loss", "hard_stop_loss", "strat", 0.04),
         "lookback_days":              pick("lookback_days", "lookback_days", "common", None),
         "profit_threshold":           pick("profit_threshold", "profit_threshold", "strat", 0.05),
-        "max_quantile_spread":        pick("max_quantile_spread", "max_quantile_spread", "strat", 0.0),
+        "max_quantile_spread":        max_quantile_spread,
+        "real_vol_oi_floor":          pick("real_vol_oi_floor", "real_vol_oi_floor", "strat", 2.0),
+        "synth_vol_oi_floor":         pick("synth_vol_oi_floor", "synth_vol_oi_floor", "strat", 2.0),
+        "synth_max_quantile_spread":  pick("synth_max_quantile_spread", "synth_max_quantile_spread", "strat", max_quantile_spread),
         "min_median_return":          pick("min_median_return", "min_median_return", "strat", 0.0),
         "slippage_pct":               pick("slippage_pct", "slippage_pct", "common", 0.01),
         "use_costs":                  pick("use_costs", "use_costs", "common", True),
@@ -1539,7 +1563,10 @@ def api_backtest(req: BacktestRequestSchema):
 
     # Resolve per-strategy + common defaults from backend/config/strategy_defaults.json.
     # Single source of truth — explicit values in the request still take precedence.
-    resolved = _resolve_strategy_defaults(req)
+    try:
+        resolved = _resolve_strategy_defaults(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Check response cache — include ALL strategy-discriminating params to avoid cross-strategy cache collisions
     try:
@@ -1557,6 +1584,7 @@ def api_backtest(req: BacktestRequestSchema):
         f"{resolved['scan_time']}_{resolved['min_kelly_fraction']}_{resolved['hard_stop_loss']}_{resolved['lookback_days']}_"
         f"{resolved['profit_threshold']}_{req.calibration_target_pct}_{resolved['max_quantile_spread']}_{resolved['min_median_return']}_{resolved['slippage_pct']}_{resolved['max_iv']}_{req.min_open_interest}"
         f"_{req.min_dte}_{req.max_dte}_{req.data_start_idx}_{req.data_end_idx}_{int(bool(req.use_synthetic))}_{int(bool(req.use_costs))}"
+        f"_{resolved['real_vol_oi_floor']}_{resolved['synth_vol_oi_floor']}_{resolved['synth_max_quantile_spread']}"
         f"_{_ens_count}"
     )
     if cache_key_resp in _backtest_response_cache:
@@ -1984,10 +2012,10 @@ def api_backtest(req: BacktestRequestSchema):
             if strategy_type == "whale_quality":
                 # Replaces _legacy_quantile_confidence.
                 # Plan 1A: all thresholds now read from the request (which the
-                # primer populates from config/strategy_defaults.json). Per-strategy
+                # resolver populates from config/strategy_defaults.json). Per-strategy
                 # JSON: prob_threshold, max_quantile_spread, min_median_return,
-                # real_vol_oi_floor (default 2.0), synth_vol_oi_floor (default 0.5),
-                # synth_max_quantile_spread (default 3.0). The dte/IV envelopes and
+                # real_vol_oi_floor, synth_vol_oi_floor, synth_max_quantile_spread.
+                # Missing config must never widen the trading book. The dte/IV envelopes and
                 # TIER_PROFITABLE_TICKERS gate stay here as data-shape invariants
                 # (not strategy-tuning knobs).
                 if not synth_mode and row.get("ticker") not in TIER_PROFITABLE_TICKERS:
@@ -1996,15 +2024,17 @@ def api_backtest(req: BacktestRequestSchema):
                 if not (15 <= iv_val <= 150):
                     continue
                 voi = float(row.get("vol_oi_ratio") or 0)
-                voi_floor = req.synth_vol_oi_floor if synth_mode else (req.real_vol_oi_floor if req.real_vol_oi_floor is not None else 2.0)
-                if voi_floor is None: voi_floor = 0.0
+                voi_floor = resolved["synth_vol_oi_floor"] if synth_mode else resolved["real_vol_oi_floor"]
+                if voi_floor is None:
+                    voi_floor = 2.0
                 if voi < voi_floor:
                     continue
                 dte_val = int(row.get("dte") or 0)
                 if not (14 <= dte_val <= 60):
                     continue
-                iqr_cap = req.synth_max_quantile_spread if synth_mode else max_quantile_spread
-                if iqr_cap is None: iqr_cap = 99.0
+                iqr_cap = resolved["synth_max_quantile_spread"] if synth_mode else max_quantile_spread
+                if iqr_cap is None:
+                    iqr_cap = max_quantile_spread
                 if p_success < cur_prob_threshold or iqr > iqr_cap or p50_pred < min_median_return:
                     continue
                 is_eligible = True
@@ -2023,8 +2053,9 @@ def api_backtest(req: BacktestRequestSchema):
                 if not (15 <= iv_val <= 150):
                     continue
                 voi = float(row.get("vol_oi_ratio") or 0)
-                voi_floor = req.synth_vol_oi_floor if synth_mode else (req.real_vol_oi_floor if req.real_vol_oi_floor is not None else 1.0)
-                if voi_floor is None: voi_floor = 0.0
+                voi_floor = resolved["synth_vol_oi_floor"] if synth_mode else resolved["real_vol_oi_floor"]
+                if voi_floor is None:
+                    voi_floor = 2.0
                 if voi < voi_floor:
                     continue
                 dte_val = int(row.get("dte") or 0)
@@ -2057,12 +2088,14 @@ def api_backtest(req: BacktestRequestSchema):
                 if not (14 <= dte_val <= 60):
                     continue
                 voi = float(row.get("vol_oi_ratio") or 0)
-                voi_floor = req.synth_vol_oi_floor if synth_mode else (req.real_vol_oi_floor if req.real_vol_oi_floor is not None else 1.0)
-                if voi_floor is None: voi_floor = 0.0
+                voi_floor = resolved["synth_vol_oi_floor"] if synth_mode else resolved["real_vol_oi_floor"]
+                if voi_floor is None:
+                    voi_floor = 2.0
                 if voi < voi_floor:
                     continue
-                iqr_cap = req.synth_max_quantile_spread if synth_mode else max_quantile_spread
-                if iqr_cap is None: iqr_cap = 99.0
+                iqr_cap = resolved["synth_max_quantile_spread"] if synth_mode else max_quantile_spread
+                if iqr_cap is None:
+                    iqr_cap = max_quantile_spread
                 # High-IV regime: require both the IQR cap and a slightly relaxed
                 # p_success threshold (the data shows fat-tailed IQRs in high IV
                 # are a property of the regime, not model miscalibration).
@@ -2380,21 +2413,19 @@ def api_get_optimal_params():
     }
 
 
-# (STRATEGY_DEFAULTS_PATH → backend/config/constants.py, see import above)
-
 @router.get("/ml/strategy-defaults")
 def api_get_strategy_defaults():
     """Returns the consolidated strategy defaults from strategy_defaults.json.
     Single source of truth for frontend/backend parameter synchronization.
     """
     try:
-        if os.path.exists(STRATEGY_DEFAULTS_PATH):
-            with open(STRATEGY_DEFAULTS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        defaults_path = get_defaults_path()
+        if os.path.exists(defaults_path):
+            data = load_defaults()
             return {
                 "available": True,
-                "path": STRATEGY_DEFAULTS_PATH,
-                "mtime": os.path.getmtime(STRATEGY_DEFAULTS_PATH),
+                "path": defaults_path,
+                "mtime": os.path.getmtime(defaults_path),
                 "config": data,
             }
         return {

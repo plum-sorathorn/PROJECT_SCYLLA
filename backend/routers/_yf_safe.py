@@ -34,7 +34,7 @@ DEFAULT_EXC = (
 _NEVER_SWALLOW = (KeyboardInterrupt, SystemExit, asyncio.CancelledError)
 
 
-def safe_call(fn, *args, timeout: float = 12, retries: int = 2, base_delay: float = 0.8,
+def safe_call(fn, *args, timeout: float = 24, retries: int = 2, base_delay: float = 0.8,
               retry_on=DEFAULT_EXC, **kwargs):
     """Run a yfinance-bound callable with a hard timeout and jittered backoff retries."""
     attempt = 0

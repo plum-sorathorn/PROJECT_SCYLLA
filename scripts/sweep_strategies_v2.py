@@ -12,7 +12,7 @@ Output:
 Methodology:
     1. Coarse grid: 30 random combinations per strategy (within realistic ranges)
     2. Refinement: top 3 from coarse, 15 combos each with smaller steps around best
-    3. Uses walkforward backtest (train 500 / test 100) on first 15k trades
+    3. Uses walkforward backtest (train 500 / test 500) on first 15k trades
     4. ProcessPoolExecutor(max_workers=5) for CPU parallelism
     5. Keeps walkforward_label_threshold=0.5 to preserve 96 MB predictions cache
 """
@@ -39,6 +39,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 
 from routers.ml_model import api_backtest, BacktestRequestSchema
+from config._strategy_loader import get_common_params
+
+COMMON_PARAMS = get_common_params()
 
 # Realistic parameter ranges (HARD CONSTRAINTS from options trading domain)
 PARAM_RANGES = {
@@ -131,8 +134,8 @@ def run_backtest_wrapper(params_dict):
         req = BacktestRequestSchema(
             mode="walkforward",
             initial_capital=100000.0,
-            walkforward_train_window=500,
-            walkforward_test_increment=100,
+            walkforward_train_window=COMMON_PARAMS["walkforward_train_window"],
+            walkforward_test_increment=COMMON_PARAMS["walkforward_test_increment"],
             walkforward_label_threshold=0.5,  # Preserve 96 MB cache
             calibration_target_pct=0.025,
             profit_threshold=params_dict.get("profit_threshold", 0.25),
@@ -276,7 +279,11 @@ def main():
     print("="*60)
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Data subset: {DATA_SUBSET_SIZE} trades")
-    print(f"Walkforward: train=500, test_increment=100, label_threshold=0.5")
+    print(
+        f"Walkforward: train={COMMON_PARAMS['walkforward_train_window']}, "
+        f"test_increment={COMMON_PARAMS['walkforward_test_increment']}, "
+        "label_threshold=0.5"
+    )
     
     # Determine worker count (leave 2 cores free for system)
     max_workers = 1  # serial sweep, paging-safe on laptops; tune via SCYLLA_MAX_WORKERS for inner pools

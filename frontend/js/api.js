@@ -24,7 +24,7 @@ async function checkHealth() {
 async function fetchScanner(minVolOI = 8.0) {
   setLoading('scanner-loading', true);
   try {
-    const r = await fetch(`${API_BASE}/api/scanner?min_vol_oi=${minVolOI}`, { signal: AbortSignal.timeout(25000) });
+    const r = await fetch(`${API_BASE}/api/scanner?min_vol_oi=${minVolOI}`, { signal: AbortSignal.timeout(50000) });
     const json = await r.json();
     state.scannerData = json.data || [];
     updateSummary(json.summary);
